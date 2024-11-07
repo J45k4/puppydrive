@@ -4,5 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "351ac73625aeb31ca574a85c0577ae21d6bca501" }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "a4e55c81a850c17cc97c4b68f31a3a82f96b5a46" }
+log = "0.4"
+simple_logger = "5"
+tokio-tungstenite = "*"
+hyper-tungstenite = "*"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "*", features = ["full"] }
+http-body-util = "*"

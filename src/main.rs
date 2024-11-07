@@ -1,15 +1,20 @@
 use std::collections::HashSet;
+use clap::Parser;
+use server_manager::ServerManager;
+use server_manager::ServerManagerEvent;
+use types::Node;
+use wgui::*;
 
-use wgui::{gui::{button, hstack, table, tbody, td, text, text_input, th, thead, tr, vstack, Item}, types::ClientEvent, Wgui};
+mod args;
+mod http_server;
+mod server_manager;
+mod types;
 
+#[derive(Debug, Default)]
 struct State {
-
-}
-
-impl State {
-	pub fn new() -> State {
-		State {}
-	}
+	nodes: Vec<Node>,
+	peers: Vec<String>,
+	binds: Vec<String>,
 }
 
 fn td2(t: &str) -> Item {
@@ -26,26 +31,16 @@ fn nodes_table(state: &State) -> Item {
 				th(text("STATUS")),
 			])
 		]),
-		tbody([
-			tr([
-				td2("1"),
-				td2("Node 1"),
-				td2("0.0"),
-				td2("Online"),
-			]),
-			tr([
-				td2("2"),
-				td2("Node 2"),
-				td2("0.0"),
-				td2("Online"),
-			]),
-			tr([
-				td2("3"),
-				td2("Node 3"),
-				td2("0.0"),
-				td2("Online"),
-			]),
-		])
+		tbody(
+			state.nodes.iter().map(|node| {
+				tr([
+					td2(&node.id.to_string()),
+					td2(&node.name),
+					td2(&node.traffic.to_string()),
+					td2(&node.status.to_string()),
+				])
+			})
+		)
 	])
 }
 
@@ -64,16 +59,18 @@ fn navigation_bar() -> Item {
 
 struct App {
 	wgui: Wgui,
-	clients: HashSet<usize>,
+	ui_clients: HashSet<usize>,
 	state: State,
+	server_manager: ServerManager,
 }
 
 impl App {
-	pub fn new() -> App {
+	pub fn new(peers: Vec<String>, binds: Vec<String>) -> App {
 		App {
 			wgui: Wgui::new("0.0.0.0:8832".parse().unwrap()),
-			clients: HashSet::new(),
-			state: State::new(),
+			ui_clients: HashSet::new(),
+			server_manager: ServerManager::new(binds.clone()),
+			state: State { peers, binds, ..Default::default() },
 		}
 	}
 
@@ -83,19 +80,36 @@ impl App {
 			nodes_table(&self.state),
 		]);
 
-		for client_id in &self.clients {
+		for client_id in &self.ui_clients {
 			self.wgui.render(*client_id, item.clone()).await;
 		}
 	}
 
 	async fn handle_event(&mut self, event: ClientEvent) {
 		match event {
-			ClientEvent::Disconnected { id } => { self.clients.remove(&id); },
-			ClientEvent::Connected { id } => { self.clients.insert(id); },
+			ClientEvent::Disconnected { id } => { self.ui_clients.remove(&id); },
+			ClientEvent::Connected { id } => { self.ui_clients.insert(id); },
 			_ => {}
 		};
 
 		self.render_ui().await;
+	}
+
+	async fn handle_server_manager_event(&mut self, event: ServerManagerEvent) {
+		match event {
+			ServerManagerEvent::NewNodeConnected(node) => {
+				self.state.nodes.push(node);
+			},
+			ServerManagerEvent::NodeDisconnected(id) => {
+				self.state.nodes.retain(|node| node.id != id);
+			},
+			ServerManagerEvent::NodeMessageReq(req) => {
+
+			},
+			ServerManagerEvent::NodeMessageRes(res) => {
+
+			},
+		}
 	}
 
 	async fn run(mut self) {
@@ -113,12 +127,40 @@ impl App {
 						},
 					}
 				}
+				server_event = self.server_manager.next_event() => {
+					match server_event {
+						Some(e) => {
+							log::info!("Server event: {:?}", e);
+							self.handle_server_manager_event(e).await;
+						},
+						None => {}
+					}
+				}
 			}
 		}
 	}
 }
 
+fn validate_peer(peer: &str) -> bool {
+	if peer.starts_with("https://") {
+		return true;
+	}
+
+	false
+}
+
 #[tokio::main]
 async fn main() {
-	App::new().run().await;
+	simple_logger::init_with_level(log::Level::Info).unwrap();
+	let args = args::Args::parse();
+
+	for peer in &args.peer {
+		if !validate_peer(peer) {
+			log::error!("Invalid peer: {}", peer);
+			return;
+		}
+	}
+
+	log::info!("peers: {:?}", args.peer);
+	App::new(args.peer, args.bind).run().await;
 }

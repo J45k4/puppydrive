@@ -687,7 +687,9 @@ dependencies = [
 name = "puppydrive"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-tungstenite",

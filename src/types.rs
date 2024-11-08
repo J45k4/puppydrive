@@ -1,3 +1,14 @@
+use std::fmt::Debug;
+use std::net::SocketAddr;
+
+#[derive(Debug, Default)]
+pub struct State {
+	pub nodes: Vec<Node>,
+	pub peers: Vec<String>,
+	pub binds: Vec<SocketAddr>,
+}
+
+
 #[derive(Debug)]
 pub enum NodeStatus {
 	Online,
@@ -19,6 +30,11 @@ pub struct Node {
 	pub name: String,
 	pub traffic: u32,
 	pub status: NodeStatus,
+    pub connections: Vec<Box<dyn NodeConnection>>,
+}
+
+trait NodeConnection: Debug {
+    fn send(&self, req: PeerReq);
 }
 
 pub struct FileInfo {
@@ -68,7 +84,7 @@ pub enum NodeCmd {
 }
 
 #[derive(Debug)]
-pub struct NodeMessageReq {
+pub struct PeerReq {
     pub id: String,
     pub cmd: NodeCmd,
 }
@@ -99,7 +115,7 @@ pub enum NodeCmdRes {
 }
 
 #[derive(Debug)]
-pub struct NodeMessageRes {
+pub struct PeerRes {
     pub id: String,
     pub res: NodeCmdRes,
 }

@@ -14,3 +14,5 @@ hyper-tungstenite = "*"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "*", features = ["full"] }
 http-body-util = "*"
+anyhow = "1"
+futures-util = "*"

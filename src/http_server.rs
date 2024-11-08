@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -11,22 +10,27 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+use crate::server_manager::ServerCmd;
+use crate::ws::WsWorker;
+
 static CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 const INDEX_HTML: &str = "<html><body><h1>PuppyDrive</h1></body></html>";
 
 struct Ctx {
+
 }
 
 async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result<Response<Full<Bytes>>, hyper::Error> {
     log::info!("{} {}", req.method(), req.uri().path());
 
-    if req.uri().path() == "/ws" && hyper_tungstenite::is_upgrade_request(&req) {
+    if hyper_tungstenite::is_upgrade_request(&req) {
         let (response, websocket) = hyper_tungstenite::upgrade(&mut req, None).unwrap();
         let id = CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
         log::debug!("websocket worker created {}", id);
         tokio::spawn(async move {
-
+            let ws = websocket.await.unwrap();
+            WsWorker::new(ws).run().await;
         });
         return Ok(response);
     }
@@ -37,16 +41,18 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result
 }
 
 pub struct HttpServer {
-    listener: TcpListener
+    listener: TcpListener,
+    cmd_rx: mpsc::UnboundedReceiver<ServerCmd>,
 }
 
 impl HttpServer {
-    pub async fn new(addr: SocketAddr) -> Self {
+    pub async fn new(addr: SocketAddr, cmd_rx: mpsc::UnboundedReceiver<ServerCmd>) -> Self {
         let listener = TcpListener::bind(addr).await.unwrap();
 		log::info!("listening on {}", addr);
 
         Self {
-            listener
+            listener,
+            cmd_rx,
         }
     }
 
@@ -60,7 +66,7 @@ impl HttpServer {
                             let io = TokioIo::new(socket);
                             tokio::spawn(async move {
                                 let service = service_fn(move |req| {
-                                    handle_req(req, Ctx {})
+                                    handle_req(req, Ctx { })
                                 });
 
                                 if let Err(err) = http1::Builder::new()

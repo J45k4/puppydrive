@@ -9,4 +9,6 @@ pub struct Args {
     pub peer: Vec<String>,
     #[clap(long)]
     pub bind: Vec<String>,
+    #[clap(long)]
+    pub ui_bind: String,
 }

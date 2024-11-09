@@ -10,15 +10,21 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+use crate::peer::Peer;
 use crate::server_manager::ServerCmd;
+use crate::server_manager::ServerManagerEvent;
 use crate::ws::WsWorker;
 
 static CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 const INDEX_HTML: &str = "<html><body><h1>PuppyDrive</h1></body></html>";
 
-struct Ctx {
+pub enum HttpServerEvent {
+    PeerConnected(Peer),
+}
 
+struct Ctx {
+    tx: mpsc::UnboundedSender<ServerManagerEvent>,
 }
 
 async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result<Response<Full<Bytes>>, hyper::Error> {
@@ -28,10 +34,17 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result
         let (response, websocket) = hyper_tungstenite::upgrade(&mut req, None).unwrap();
         let id = CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
         log::debug!("websocket worker created {}", id);
+        let (sender_tx, sender_rx) = mpsc::unbounded_channel();
+        let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
+        let ws = websocket.await.unwrap();
         tokio::spawn(async move {
-            let ws = websocket.await.unwrap();
-            WsWorker::new(ws).run().await;
+            let worker = WsWorker::new(ws);
         });
+        let peer = Peer {
+            tx: sender_tx,
+            rx: receiver_rx,
+        };
+        ctx.tx.send(ServerManagerEvent::PeerConnected(peer));
         return Ok(response);
     }
 
@@ -42,21 +55,21 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result
 
 pub struct HttpServer {
     listener: TcpListener,
-    cmd_rx: mpsc::UnboundedReceiver<ServerCmd>,
+    tx: mpsc::UnboundedSender<ServerManagerEvent>,
 }
 
 impl HttpServer {
-    pub async fn new(addr: SocketAddr, cmd_rx: mpsc::UnboundedReceiver<ServerCmd>) -> Self {
+    pub async fn new(addr: SocketAddr, tx: mpsc::UnboundedSender<ServerManagerEvent>) -> Self {
         let listener = TcpListener::bind(addr).await.unwrap();
 		log::info!("listening on {}", addr);
 
         Self {
             listener,
-            cmd_rx,
+            tx,
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         loop {
             tokio::select! {
                 res = self.listener.accept() => {
@@ -64,9 +77,11 @@ impl HttpServer {
                         Ok((socket, addr)) => {
                             log::info!("accepted connection from {}", addr);
                             let io = TokioIo::new(socket);
+                            let tx = self.tx.clone();
                             tokio::spawn(async move {
                                 let service = service_fn(move |req| {
-                                    handle_req(req, Ctx { })
+                                    let tx = tx.clone();
+                                    handle_req(req, Ctx { tx })
                                 });
 
                                 if let Err(err) = http1::Builder::new()

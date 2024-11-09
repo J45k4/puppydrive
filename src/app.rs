@@ -49,8 +49,18 @@ impl App {
 
 	async fn handle_server_manager_event(&mut self, event: ServerManagerEvent) {
 		match event {
-			ServerManagerEvent::NodeConnected(e) => {
-				self.state.nodes.push(e.node);
+			ServerManagerEvent::PeerConnected(peer) => {
+				log::info!("new peer connected 🥳");
+				peer.send(PeerReq {
+					id: "qwerty".to_string(),
+					cmd: NodeCmd::ListFolderContents {
+						node_id: "qwerty".to_string(),
+						path: "/".to_string(),
+						offset: 0,
+						length: 1024,
+						recursive: false,
+					},
+				});
 			},
 			ServerManagerEvent::NodeDisconnected(id) => {
 				self.state.nodes.retain(|node| node.id != id);

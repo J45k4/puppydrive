@@ -1,12 +1,7 @@
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use app::App;
 use clap::Parser;
 use peer::Peer;
-use server_manager::ServerManager;
-use server_manager::ServerManagerEvent;
-use types::Node;
-use wgui::*;
 
 mod args;
 mod http_server;

@@ -17,17 +17,19 @@ where
 
     pub async fn run(mut self) {
         let mut ws_stream = self.ws;
+        ws_stream.send(Message::Text("Hello world".to_string())).await.unwrap();
         while let Some(msg) = ws_stream.next().await {
             match msg {
                 Ok(msg) => {
                     match msg {
                         Message::Text(text) => {
-                            log::debug!("received text message: {}", text);
+                            log::info!("received text message: {}", text);
                         },
                         Message::Binary(data) => {
-                            log::debug!("received binary message: {} bytes", data.len());
+                            log::info!("received binary message: {} bytes", data.len());
                         },
                         Message::Ping(_) => {
+                            log::info!("received ping");
                             // Send pong response
                             if let Err(e) = ws_stream.send(Message::Pong(vec![])).await {
                                 log::error!("error sending pong: {}", e);
@@ -35,7 +37,7 @@ where
                             }
                         },
                         Message::Close(_) => {
-                            log::debug!("received close message");
+                            log::info!("received close message");
                             break;
                         },
                         _ => {}

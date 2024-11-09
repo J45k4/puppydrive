@@ -9,6 +9,6 @@ pub struct Args {
     pub peer: Vec<String>,
     #[clap(long)]
     pub bind: Vec<String>,
-    #[clap(long)]
+    #[clap(long, default_value = "127.0.0.1:8832")]
     pub ui_bind: String,
 }

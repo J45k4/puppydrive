@@ -119,3 +119,8 @@ pub struct PeerRes {
     pub id: String,
     pub res: NodeCmdRes,
 }
+
+pub enum PeerMsg {
+    Cmd(NodeCmd),
+    Res(NodeCmdRes)
+}

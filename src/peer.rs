@@ -14,9 +14,11 @@ impl Peer {
         let (ws, _) = connect_async(addr).await?;
         let (sender_tx, sender_rx) = mpsc::unbounded_channel();
         let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
-        let worker = WsWorker::new(ws);
+        let mut worker = WsWorker::new(ws);
         tokio::spawn(async move {
-            worker.run().await;
+            while let Some(msg) = worker.recv().await {
+
+            }
         });
         Ok(Self {
             tx: sender_tx,

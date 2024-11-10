@@ -38,7 +38,10 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result
         let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
         let ws = websocket.await.unwrap();
         tokio::spawn(async move {
-            let worker = WsWorker::new(ws);
+            let mut worker = WsWorker::new(ws);
+            while let Some(res) = worker.recv().await {
+
+            }
         });
         let peer = Peer {
             tx: sender_tx,

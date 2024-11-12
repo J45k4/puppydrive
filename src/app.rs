@@ -12,26 +12,20 @@ pub struct App {
 	ui_clients: HashSet<usize>,
 	state: State,
 	server_manager: ServerManager,
-    peers: Vec<Peer>,
 }
 
 impl App {
-	pub fn new(peers: Vec<String>, binds: Vec<SocketAddr>, ui_bind: SocketAddr) -> App {
+	pub fn new(peers: Vec<Peer>, binds: Vec<SocketAddr>, ui_bind: SocketAddr) -> App {
 		App {
 			wgui: Wgui::new(ui_bind),
 			ui_clients: HashSet::new(),
 			server_manager: ServerManager::new(binds.clone()),
 			state: State { peers, binds, ..Default::default() },
-			peers: Vec::new(),
 		}
 	}
 
 	async fn render_ui(&mut self) {
-		let item = vstack([
-			navigation_bar(),
-			nodes_table(&self.state),
-		]);
-
+		let item = render_ui(&self.state);
 		for client_id in &self.ui_clients {
 			self.wgui.render(*client_id, item.clone()).await;
 		}
@@ -43,24 +37,13 @@ impl App {
 			ClientEvent::Connected { id } => { self.ui_clients.insert(id); },
 			_ => {}
 		};
-
-		self.render_ui().await;
 	}
 
 	async fn handle_server_manager_event(&mut self, event: ServerManagerEvent) {
 		match event {
 			ServerManagerEvent::PeerConnected(peer) => {
 				log::info!("new peer connected 🥳");
-				peer.send(PeerReq {
-					id: "qwerty".to_string(),
-					cmd: NodeCmd::ListFolderContents {
-						node_id: "qwerty".to_string(),
-						path: "/".to_string(),
-						offset: 0,
-						length: 1024,
-						recursive: false,
-					},
-				});
+				self.state.peers.push(peer);
 			},
 			ServerManagerEvent::NodeDisconnected(id) => {
 				self.state.nodes.retain(|node| node.id != id);
@@ -99,6 +82,7 @@ impl App {
 					}
 				}
 			}
+			self.render_ui().await;
 		}
 	}
 }

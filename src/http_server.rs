@@ -31,23 +31,27 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result
     log::info!("{} {}", req.method(), req.uri().path());
 
     if hyper_tungstenite::is_upgrade_request(&req) {
-        let (response, websocket) = hyper_tungstenite::upgrade(&mut req, None).unwrap();
         let id = CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
-        log::debug!("websocket worker created {}", id);
+        log::info!("[{}] new websocket connection", id);
+        let (response, websocket) = hyper_tungstenite::upgrade(&mut req, None).unwrap();
+        log::info!("[{}] websocket upgrade complete", id);
         let (sender_tx, sender_rx) = mpsc::unbounded_channel();
         let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
-        let ws = websocket.await.unwrap();
         tokio::spawn(async move {
+            let ws = websocket.await.unwrap();
+            log::info!("[{}] websocket connection established", id);
             let mut worker = WsWorker::new(ws);
             while let Some(res) = worker.recv().await {
-
+                
             }
         });
         let peer = Peer {
+            name: "MIKKO".to_string(),
+            ip: "qwert".to_string(),
             tx: sender_tx,
             rx: receiver_rx,
         };
-        ctx.tx.send(ServerManagerEvent::PeerConnected(peer));
+        ctx.tx.send(ServerManagerEvent::PeerConnected(peer)).unwrap();
         return Ok(response);
     }
 
@@ -74,6 +78,7 @@ impl HttpServer {
 
     pub async fn run(self) {
         loop {
+            log::info!("loop");
             tokio::select! {
                 res = self.listener.accept() => {
                     match res {

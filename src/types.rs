@@ -1,10 +1,11 @@
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use crate::peer::Peer;
 
 #[derive(Debug, Default)]
 pub struct State {
 	pub nodes: Vec<Node>,
-	pub peers: Vec<String>,
+	pub peers: Vec<Peer>,
 	pub binds: Vec<SocketAddr>,
 }
 

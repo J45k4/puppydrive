@@ -25,15 +25,18 @@ async fn main() {
 	simple_logger::init_with_level(log::Level::Info).unwrap();
 	let args = args::Args::parse();
 
+	let mut peers = Vec::new();
 	for peer_addr in &args.peer {
 		let peer = Peer::connect(peer_addr).await.unwrap();
 		log::info!("peer connected: {}", peer_addr);
+		peers.push(peer);
 	}
 
 	let binds: Vec<SocketAddr> = args.bind.iter().map(|bind| bind.parse::<SocketAddr>().unwrap()).collect();
 
 	log::info!("peers: {:?}", args.peer);
+	log::info!("binds: {:?}", binds);
 
 	let ui_bind = args.ui_bind.parse::<SocketAddr>().unwrap();
-	App::new(args.peer, binds, ui_bind).run().await;
+	App::new(peers, binds, ui_bind).run().await;
 }

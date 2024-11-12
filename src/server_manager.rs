@@ -32,9 +32,11 @@ impl ServerManager {
     pub fn new(binds: Vec<SocketAddr>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         for bind in binds {
+            log::info!("starting http server on {}", bind);
             let tx = tx.clone();
             tokio::spawn(async move {
                 HttpServer::new(bind, tx).await.run().await;
+                log::info!("http server stopped on {}", bind);
             });
         }
         Self { 

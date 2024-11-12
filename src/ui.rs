@@ -28,9 +28,29 @@ pub fn nodes_table(state: &State) -> Item {
 	])
 }
 
+pub fn peers_table(state: &State) -> Item {
+	table([
+		thead([
+			tr([
+				th(text("NAME")),
+				th(text("IP")),
+			])
+		]),
+		tbody(
+			state.peers.iter().map(|peer| {
+				tr([
+					td2(&peer.name),
+					td2(&peer.ip),
+				])
+			})
+		)
+	])
+}
+
 pub fn navigation_bar() -> Item {
 	hstack([
 		hstack([
+			text("Peers").cursor("pointer"),
 			text("Nodes").cursor("pointer"),
 			text("Files").cursor("pointer"),
 			text("Virtual folders").cursor("pointer")
@@ -39,4 +59,14 @@ pub fn navigation_bar() -> Item {
 			.spacing(20),
 		text("Settings"),
 	])
+}
+
+
+pub fn render_ui(state: &State) -> Item {
+	let item = vstack([
+		navigation_bar(),
+		peers_table(state),
+	]);
+
+	item
 }

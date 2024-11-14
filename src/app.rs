@@ -1,26 +1,25 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use crate::peer::Peer;
-use crate::server_manager::ServerManager;
-use crate::server_manager::ServerManagerEvent;
 use crate::types::*;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use wgui::*;
 use crate::ui::*;
 
 pub struct App {
 	wgui: Wgui,
+	event_rx: UnboundedReceiver<Event>,
 	ui_clients: HashSet<usize>,
 	state: State,
-	server_manager: ServerManager,
-}
+} 
 
 impl App {
-	pub fn new(peers: Vec<Peer>, binds: Vec<SocketAddr>, ui_bind: SocketAddr) -> App {
-		App {
+	pub fn new(event_rx: UnboundedReceiver<Event>, ui_bind: SocketAddr, peers_tx: Vec<UnboundedSender<PeerCmd>>) -> Self {
+		Self {
 			wgui: Wgui::new(ui_bind),
+			event_rx,
 			ui_clients: HashSet::new(),
-			server_manager: ServerManager::new(binds.clone()),
-			state: State { peers, binds, ..Default::default() },
+			state: State::default()
 		}
 	}
 
@@ -31,7 +30,7 @@ impl App {
 		}
 	}
 
-	async fn handle_event(&mut self, event: ClientEvent) {
+	async fn handle_wgui_event(&mut self, event: ClientEvent) {
 		match event {
 			ClientEvent::Disconnected { id } => { self.ui_clients.remove(&id); },
 			ClientEvent::Connected { id } => { self.ui_clients.insert(id); },
@@ -39,21 +38,10 @@ impl App {
 		};
 	}
 
-	async fn handle_server_manager_event(&mut self, event: ServerManagerEvent) {
+	async fn handle_event(&mut self, event: Event) {
 		match event {
-			ServerManagerEvent::PeerConnected(peer) => {
-				log::info!("new peer connected 🥳");
-				self.state.peers.push(peer);
-			},
-			ServerManagerEvent::NodeDisconnected(id) => {
-				self.state.nodes.retain(|node| node.id != id);
-			},
-			ServerManagerEvent::NodeMessageReq(req) => {
-
-			},
-			ServerManagerEvent::NodeMessageRes(res) => {
-
-			},
+			Event::PeerConnected(_) => {},
+			Event::PeerDisconnected(_) => {},
 		}
 	}
 
@@ -64,7 +52,7 @@ impl App {
 					match event {
 						Some(e) => {
 							println!("Event: {:?}", e);
-							self.handle_event(e).await;
+							self.handle_wgui_event(e).await;
 						},
 						None => {
 							println!("No event");
@@ -72,13 +60,15 @@ impl App {
 						},
 					}
 				}
-				server_event = self.server_manager.next_event() => {
-					match server_event {
+				event = self.event_rx.recv() => {
+					match event {
 						Some(e) => {
-							log::info!("Server event: {:?}", e);
-							self.handle_server_manager_event(e).await;
+							self.handle_event(e).await;
 						},
-						None => {}
+						None => {
+							log::error!("event_rx closed");
+							break;
+						},
 					}
 				}
 			}

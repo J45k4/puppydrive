@@ -5,29 +5,6 @@ pub fn td2(t: &str) -> Item {
 	td(text(t)).text_align("center")
 }
 
-pub fn nodes_table(state: &State) -> Item {
-	table([
-		thead([
-			tr([
-				th(text("ID")),
-				th(text("NAME")),
-				th(text("TRAFFIC")),
-				th(text("STATUS")),
-			])
-		]),
-		tbody(
-			state.nodes.iter().map(|node| {
-				tr([
-					td2(&node.id.to_string()),
-					td2(&node.name),
-					td2(&node.traffic.to_string()),
-					td2(&node.status.to_string()),
-				])
-			})
-		)
-	])
-}
-
 pub fn peers_table(state: &State) -> Item {
 	table([
 		thead([
@@ -39,8 +16,8 @@ pub fn peers_table(state: &State) -> Item {
 		tbody(
 			state.peers.iter().map(|peer| {
 				tr([
-					td2(&peer.name),
-					td2(&peer.ip),
+					td2(&peer.name.clone().unwrap_or_default()),
+					td2(&peer.addr.clone().unwrap_or_default()),
 				])
 			})
 		)

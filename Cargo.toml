@@ -16,3 +16,6 @@ hyper-util = { version = "*", features = ["full"] }
 http-body-util = "*"
 anyhow = "1"
 futures-util = "*"
+bincode = "1"
+gethostname = "0.5"
+uuid =  { version = "1", features = ["v4"] }

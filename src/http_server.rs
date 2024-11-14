@@ -9,10 +9,9 @@ use hyper::Response;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-
-use crate::peer::Peer;
 use crate::server_manager::ServerCmd;
 use crate::server_manager::ServerManagerEvent;
+use crate::ws::start_ws_worker;
 use crate::ws::WsWorker;
 
 static CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -37,6 +36,7 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>, ctx: Ctx) -> Result
         log::info!("[{}] websocket upgrade complete", id);
         let (sender_tx, sender_rx) = mpsc::unbounded_channel();
         let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
+		start_ws_worker(tx, rx);
         tokio::spawn(async move {
             let ws = websocket.await.unwrap();
             log::info!("[{}] websocket connection established", id);

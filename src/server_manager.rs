@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use crate::http_server::HttpServer;
-use crate::peer::Peer;
 use crate::types::*;
 
 #[derive(Debug)]
@@ -14,7 +13,7 @@ pub struct NodeConnected {
 #[derive(Debug)]
 pub enum ServerManagerEvent {
     PeerConnected(Peer),
-    NodeDisconnected(String),
+	PeerDisconnected(Peer),
     NodeMessageReq(PeerReq),
     NodeMessageRes(PeerRes),
 }

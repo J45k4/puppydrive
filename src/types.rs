@@ -1,14 +1,45 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use crate::peer::Peer;
+use std::rc::Rc;
+
+pub type SharedState = Rc<RefCell<State>>;
 
 #[derive(Debug, Default)]
 pub struct State {
-	pub nodes: Vec<Node>,
+	pub me: Peer,
 	pub peers: Vec<Peer>,
 	pub binds: Vec<SocketAddr>,
 }
 
+impl State {
+	pub fn new_shared() -> Rc<RefCell<State>> {
+		Rc::new(RefCell::new(State::default()))
+	}
+
+    pub fn get_peer_with_addr(&mut self, addr: &str) -> &mut Peer {
+		let pos = self.peers.iter().position(|peer| peer.addr.as_deref() == Some(addr));
+		match pos {
+			Some(pos) => self.peers.get_mut(pos).unwrap(),
+			None => {
+				let peer = Peer {
+					addr: Some(addr.to_string()),
+					..Default::default()
+				};
+				self.peers.push(peer);
+				self.peers.last_mut().unwrap()
+			}
+		}
+	}
+}
+
+#[derive(Debug, Default)]
+pub struct Peer {
+	pub id: Option<String>,
+	pub name: Option<String>,
+	pub owner: Option<String>,
+    pub addr: Option<String>
+}
 
 #[derive(Debug)]
 pub enum NodeStatus {
@@ -31,11 +62,7 @@ pub struct Node {
 	pub name: String,
 	pub traffic: u32,
 	pub status: NodeStatus,
-    pub connections: Vec<Box<dyn NodeConnection>>,
-}
-
-trait NodeConnection: Debug {
-    fn send(&self, req: PeerReq);
+	pub addr: Option<String>
 }
 
 pub struct FileInfo {
@@ -45,7 +72,7 @@ pub struct FileInfo {
 }
 
 #[derive(Debug)]
-pub enum NodeCmd {
+pub enum PeerCmd {
     ReadFile {
         node_id: String,
         path: String,
@@ -81,13 +108,17 @@ pub enum NodeCmd {
         offset: u64,
         length: u64,
         recursive: bool,
-    }
+    },
+	Introduce {
+		name: String,
+		owner: String,
+	}
 }
 
 #[derive(Debug)]
 pub struct PeerReq {
     pub id: String,
-    pub cmd: NodeCmd,
+    pub cmd: PeerCmd,
 }
 
 #[derive(Debug)]
@@ -121,7 +152,22 @@ pub struct PeerRes {
     pub res: NodeCmdRes,
 }
 
+#[derive(Debug)]
 pub enum PeerMsg {
-    Cmd(NodeCmd),
+    Cmd(PeerCmd),
     Res(NodeCmdRes)
+}
+
+pub enum Event {
+	PeerConnected(String),
+	PeerDisconnected(String),
+	PeerCmd {
+		addr: String,
+		cmd: PeerCmd
+	},
+	ConnectFailed {
+		addr: String,
+		err: anyhow::Error,
+	},
+
 }

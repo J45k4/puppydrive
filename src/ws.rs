@@ -1,108 +1,114 @@
 use futures_util::StreamExt;
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::task::spawn_local;
+use tokio_tungstenite::accept_async;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use futures_util::SinkExt;
+use crate::pupynet::PupynetEvent;
 use crate::types::Event;
+use crate::types::PeerConnCmd;
 use crate::types::PeerMsg;
 use crate::types::SharedState;
 
-pub struct WsWorker<T> {
-    ws: WebSocketStream<T>
-}
-
-impl<T> WsWorker<T>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+async fn handle_ws<T>(mut ws: WebSocketStream<T>, addr: String, event_tx: mpsc::UnboundedSender<PupynetEvent>, mut peer_rx: mpsc::UnboundedReceiver<PeerConnCmd>)
+where 
+	T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin
 {
-    pub fn new(ws: WebSocketStream<T>) -> Self {
-        Self { ws }
-    }
-
-    pub async fn recv(&mut self) -> Option<PeerMsg> {
-        while let Some(msg) = self.ws.next().await {
-            match msg {
-                Ok(msg) => {
-                    match msg {
-                        Message::Text(text) => {
-                            log::info!("received text message: {}", text);
-                        },
-                        Message::Binary(data) => {
-                            log::info!("received binary message: {} bytes", data.len());
-                        },
-						Message::Frame(f) => {}
-                        Message::Ping(_) => {
-                            log::info!("received ping");
-                            // Send pong response
-                            if let Err(e) = self.ws.send(Message::Pong(vec![])).await {
-                                log::error!("error sending pong: {}", e);
-                                break;
-                            }
-                        },
-                        Message::Close(_) => {
-                            log::info!("received close message");
-                            break;
-                        },
-                        _ => {}
-                    }
-                },
-                Err(e) => {
-                    log::error!("error receiving message: {}", e);
-                    break;
-                }
-            }
-        }
-        log::info!("ws worker stopped");
-        None
-    }
-}
-
-
-pub fn start_ws_worker(tx: tokio::sync::mpsc::UnboundedSender<PeerMsg>, rx: mpsc::UnboundedReceiver<PeerMsg>) {
-    tokio::spawn(async move {
-        // let mut worker = WsWorker::new(ws);
-        // while let Some(msg) = worker.recv().await {
-        //     tx.send(msg).unwrap();
-        // }
-    });
-
-}
-
-
-pub async fn connect(addr: &str) -> anyhow::Result<()> {
-	log::info!("connecting to peer: {}", addr);
-	let (ws, _) = connect_async(addr).await?;
-	log::info!("connected to peer: {}", addr);
-	// let (sender_tx, sender_rx) = mpsc::unbounded_channel();
-	// let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
-	let mut worker = WsWorker::new(ws);
-	todo!()
-}
-
-pub async fn start_ws(url: &str, rx: broadcast::Receiver<Event>, state: SharedState) {
-	// let (ws, _) = connect_async(url).await.unwrap();
-	// let (tx, rx) = mpsc::unbounded_channel();
-	// let mut worker = WsWorker::new(ws);
-	let url = url.to_string();
-	spawn_local(async move {
-		// while let Some(msg) = worker.recv().await {
-		// 	match msg {
-		// 		PeerMsg::NodeMessageReq(req) => {
-		// 			log::info!("node message req: {:?}", req);
-		// 		},
-		// 		PeerMsg::NodeMessageRes(res) => {
-		// 			log::info!("node message res: {:?}", res);
-		// 		},
-		// 		_ => {}
-		// 	}
-		// }
-		
-		loop {
-			let (ws, _) = connect_async(&url).await.unwrap();
-
+	loop {
+		tokio::select! {
+			msg = ws.next() => {
+				match msg {
+					Some(msg) => {
+						match msg {
+							Ok(msg) => {
+								match msg {
+									Message::Text(text) => log::info!("received text message: {}", text),
+									Message::Binary(data) => {
+										match event_tx.send(PupynetEvent::PeerData { addr: addr.clone(), data }) {
+											Ok(_) => {},
+											Err(err) => {
+												log::error!("error sending event: {}", err);
+												break;
+											}
+										}
+									},
+									Message::Ping(vec) => { log::info!("received ping"); },
+									Message::Pong(vec) => { log::info!("received pong"); },
+									Message::Close(close_frame) => {
+										log::info!("received close message: {:?}", close_frame);
+										break;
+									},
+									Message::Frame(frame) => {},
+								}
+							},
+							Err(err) => {
+								log::error!("error receiving message: {}", err);
+								break;
+							},
+						}
+					}
+					None => {
+						log::error!("connection closed");
+					}
+				}
+			}
+			cmd = peer_rx.recv() => {
+				match cmd {
+					Some(cmd) => {
+						match cmd {
+							PeerConnCmd::Send(msg) => {
+								log::info!("sending message: {:?}", msg);
+							}
+							PeerConnCmd::Close => {
+								log::info!("closing connection");
+								break;
+							}
+						}
+					},
+					None => {
+						log::error!("peer conn rx closed");
+						break;
+					}
+				}
+			}
 		}
-	});
+	}
+
+	if let Err(err) = event_tx.send(PupynetEvent::PeerDisconnected { addr }) {
+		log::error!("error sending event: {}", err);
+	}
+}
+
+pub async fn connect(addr: String, event_tx: mpsc::UnboundedSender<PupynetEvent>, peer_rx: mpsc::UnboundedReceiver<PeerConnCmd>) -> anyhow::Result<()> {
+	log::info!("connecting to peer: {}", addr);
+	let (ws, _) = connect_async(&addr).await?;
+	log::info!("connected to peer: {}", addr);
+	handle_ws(ws, addr, event_tx, peer_rx).await;
+	Ok(())
+}
+
+pub async fn bind(addr: String, event_tx: mpsc::UnboundedSender<PupynetEvent>) -> anyhow::Result<()> {
+	log::info!("binding to peer: {}", addr);
+    let listener = TcpListener::bind(&addr.replace("ws://", "")).await.expect("Failed to bind");
+    log::info!("WebSocket server listening on ws://{}", addr);
+    while let Ok((stream, _)) = listener.accept().await {
+		let addr = stream.peer_addr().expect("Connected streams should have a peer address");
+		log::info!("New connection from {}", addr);
+		let ws = accept_async(stream).await.expect("Error during the websocket handshake");
+		log::info!("WebSocket connection established: {}", addr);
+		let (tx, rx) = mpsc::unbounded_channel();
+		let event_tx = event_tx.clone();
+		if let Err(err) = event_tx.send(PupynetEvent::PeerConnected { addr: addr.to_string(), tx: tx }) {
+			log::error!("error sending event: {}", err);
+			break;
+		}
+		tokio::spawn(async move {
+			handle_ws(ws, addr.to_string(), event_tx, rx).await;
+		});
+    }
+	Ok(())
 }

@@ -1,25 +1,23 @@
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use crate::pupynet::Pupynet;
 use crate::types::*;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
 use wgui::*;
 use crate::ui::*;
 
-pub struct App {
+pub struct App<P> {
 	wgui: Wgui,
-	event_rx: UnboundedReceiver<Event>,
+	pupynet: P,
 	ui_clients: HashSet<usize>,
 	state: State,
 } 
 
-impl App {
-	pub fn new(event_rx: UnboundedReceiver<Event>, ui_bind: SocketAddr, peers_tx: Vec<UnboundedSender<PeerCmd>>) -> Self {
+impl<P: Pupynet> App<P> {
+	pub fn new(state: State, wgui: Wgui, pupynet: P) -> Self {
 		Self {
-			wgui: Wgui::new(ui_bind),
-			event_rx,
+			state,
+			wgui,
+			pupynet,
 			ui_clients: HashSet::new(),
-			state: State::default()
 		}
 	}
 
@@ -38,10 +36,29 @@ impl App {
 		};
 	}
 
-	async fn handle_event(&mut self, event: Event) {
+	async fn handle_pupynet_event(&mut self, event: Event) {
 		match event {
-			Event::PeerConnected(_) => {},
-			Event::PeerDisconnected(_) => {},
+			Event::ConnectFailed { addr, err } => {
+				log::error!("connect failed: addr: {}, err: {}", addr, err);
+			}
+			Event::PeerConnected { addr } => {
+				self.state.get_peer_with_addr(&addr);
+				let cmd = PeerCmd::Introduce { 
+					name: self.state.me.name.clone().unwrap_or_default(),
+					owner: self.state.me.owner.clone().unwrap_or_default(),
+				};
+				self.pupynet.send(&addr, cmd).unwrap();
+			}
+			Event::PeerDisconnected { addr } => {
+				let peer = self.state.get_peer_with_addr(&addr);
+				peer.addr = None;
+			}
+			Event::PeerData {
+				addr,
+				data
+			} => {
+				log::info!("received data from peer: {}", addr);
+			}
 		}
 	}
 
@@ -55,18 +72,18 @@ impl App {
 							self.handle_wgui_event(e).await;
 						},
 						None => {
-							println!("No event");
+							log::error!("wgui closed");
 							break;
 						},
 					}
 				}
-				event = self.event_rx.recv() => {
+				event = self.pupynet.wait() => {
 					match event {
 						Some(e) => {
-							self.handle_event(e).await;
+							self.handle_pupynet_event(e).await;
 						},
 						None => {
-							log::error!("event_rx closed");
+							log::error!("pupynet closed");
 							break;
 						},
 					}

@@ -159,15 +159,23 @@ pub enum PeerMsg {
 }
 
 pub enum Event {
-	PeerConnected(String),
-	PeerDisconnected(String),
-	PeerCmd {
+	PeerConnected{
+		addr: String
+	},
+	PeerDisconnected {
+		addr: String
+	},
+	PeerData {
 		addr: String,
-		cmd: PeerCmd
+		data: Vec<u8>
 	},
 	ConnectFailed {
 		addr: String,
 		err: anyhow::Error,
 	},
+}
 
+pub enum PeerConnCmd {
+	Close,
+	Send(Vec<u8>)
 }

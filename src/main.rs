@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use app::App;
 use clap::Parser;
 use gethostname::gethostname;
 use pupynet::Pupynet;
@@ -16,6 +17,8 @@ mod ws;
 mod tcp;
 mod protocol;
 mod pupynet;
+mod cmd_parser;
+mod app;
 
 #[tokio::main]
 async fn main() {
@@ -42,29 +45,5 @@ async fn main() {
 		pupynet.bind(bind_addr).unwrap();
 	}
 
-	while let Some(event) = pupynet.wait().await {
-		match event {
-			Event::ConnectFailed { addr, err } => {
-				log::error!("connect failed: addr: {}, err: {}", addr, err);
-			}
-			Event::PeerConnected(addr) => {
-				state.get_peer_with_addr(&addr);
-				let cmd = PeerCmd::Introduce { 
-					name: state.me.name.clone().unwrap_or_default(),
-					owner: state.me.owner.clone().unwrap_or_default(),
-				};
-				pupynet.send(&addr, cmd);
-			}
-			Event::PeerDisconnected(addr) => {
-				let peer = state.get_peer_with_addr(&addr);
-				peer.addr = None;
-			}
-			Event::PeerCmd {
-				addr,
-				cmd
-			} => {
-
-			}
-		}
-	}
+	App::new(state, wgui, pupynet).run().await;
 }

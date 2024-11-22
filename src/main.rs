@@ -4,8 +4,6 @@ use clap::Parser;
 use gethostname::gethostname;
 use pupynet::Pupynet;
 use pupynet::PupynetImpl;
-use types::Event;
-use types::PeerCmd;
 use types::State;
 use uuid::Uuid;
 use wgui::Wgui;
@@ -31,7 +29,7 @@ async fn main() {
 	}
 
 	let ui_bind = args.ui_bind.parse::<SocketAddr>().unwrap();
-	let mut wgui = Wgui::new(ui_bind);
+	let wgui = Wgui::new(ui_bind);
 	let mut pupynet = PupynetImpl::new();
 
 	let hostname = gethostname().to_string_lossy().to_string();

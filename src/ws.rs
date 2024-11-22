@@ -28,6 +28,7 @@ where
 								match msg {
 									Message::Text(text) => log::info!("received text message: {}", text),
 									Message::Binary(data) => {
+										log::info!("received binary message: {:?}", data);
 										match event_tx.send(PupynetEvent::PeerData { addr: addr.clone(), data }) {
 											Ok(_) => {},
 											Err(err) => {
@@ -62,6 +63,13 @@ where
 						match cmd {
 							PeerConnCmd::Send(msg) => {
 								log::info!("sending message: {:?}", msg);
+								match ws.send(Message::Binary(msg)).await {
+									Ok(_) => {},
+									Err(err) => {
+										log::error!("error sending message: {}", err);
+										break;
+									}
+								}
 							}
 							PeerConnCmd::Close => {
 								log::info!("closing connection");
@@ -94,7 +102,7 @@ pub async fn connect(addr: String, event_tx: mpsc::UnboundedSender<PupynetEvent>
 pub async fn bind(addr: String, event_tx: mpsc::UnboundedSender<PupynetEvent>) -> anyhow::Result<()> {
 	log::info!("binding to peer: {}", addr);
     let listener = TcpListener::bind(&addr.replace("ws://", "")).await.expect("Failed to bind");
-    log::info!("WebSocket server listening on ws://{}", addr);
+    log::info!("WebSocket server listening on {}", addr);
     while let Ok((stream, _)) = listener.accept().await {
 		let addr = stream.peer_addr().expect("Connected streams should have a peer address");
 		log::info!("New connection from {}", addr);

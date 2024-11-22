@@ -3,6 +3,8 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
+use crate::protocol::Introduce;
+
 pub type SharedState = Rc<RefCell<State>>;
 
 #[derive(Debug, Default)]
@@ -13,10 +15,6 @@ pub struct State {
 }
 
 impl State {
-	pub fn new_shared() -> Rc<RefCell<State>> {
-		Rc::new(RefCell::new(State::default()))
-	}
-
     pub fn get_peer_with_addr(&mut self, addr: &str) -> &mut Peer {
 		let pos = self.peers.iter().position(|peer| peer.addr.as_deref() == Some(addr));
 		match pos {
@@ -38,7 +36,8 @@ pub struct Peer {
 	pub id: Option<String>,
 	pub name: Option<String>,
 	pub owner: Option<String>,
-    pub addr: Option<String>
+    pub addr: Option<String>,
+	pub introduced: bool,
 }
 
 #[derive(Debug)]
@@ -109,10 +108,7 @@ pub enum PeerCmd {
         length: u64,
         recursive: bool,
     },
-	Introduce {
-		name: String,
-		owner: String,
-	}
+	Introduce(Introduce)
 }
 
 #[derive(Debug)]
@@ -167,7 +163,7 @@ pub enum Event {
 	},
 	PeerData {
 		addr: String,
-		data: Vec<u8>
+		cmd: PeerCmd
 	},
 	ConnectFailed {
 		addr: String,

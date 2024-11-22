@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use crate::protocol::Introduce;
 use crate::pupynet::Pupynet;
 use crate::types::*;
 use wgui::*;
@@ -42,11 +43,13 @@ impl<P: Pupynet> App<P> {
 				log::error!("connect failed: addr: {}, err: {}", addr, err);
 			}
 			Event::PeerConnected { addr } => {
-				self.state.get_peer_with_addr(&addr);
-				let cmd = PeerCmd::Introduce { 
+				let peer = self.state.get_peer_with_addr(&addr);
+				peer.introduced = true;
+				let cmd = PeerCmd::Introduce(Introduce {
+					id: self.state.me.id.clone().unwrap_or_default(),
 					name: self.state.me.name.clone().unwrap_or_default(),
 					owner: self.state.me.owner.clone().unwrap_or_default(),
-				};
+				});
 				self.pupynet.send(&addr, cmd).unwrap();
 			}
 			Event::PeerDisconnected { addr } => {
@@ -55,9 +58,31 @@ impl<P: Pupynet> App<P> {
 			}
 			Event::PeerData {
 				addr,
-				data
+				cmd
 			} => {
-				log::info!("received data from peer: {}", addr);
+				log::info!("[{}] received cmd: {:?}", addr, cmd);
+
+				match cmd {
+					PeerCmd::ReadFile { node_id, path, offset, length } => todo!(),
+					PeerCmd::WriteFile { node_id, path, offset, data } => todo!(),
+					PeerCmd::RemoveFile { node_id, path } => todo!(),
+					PeerCmd::CreateFolder { node_id, path } => todo!(),
+					PeerCmd::RenameFolder { node_id, path, new_name } => todo!(),
+					PeerCmd::RemoveFolder { node_id, path } => todo!(),
+					PeerCmd::ListFolderContents { node_id, path, offset, length, recursive } => todo!(),
+					PeerCmd::Introduce(introduce) => {
+						let peer = self.state.get_peer_with_addr(&addr);
+						if !peer.introduced {
+							peer.introduced = true;
+							let cmd = PeerCmd::Introduce(Introduce {
+								id: self.state.me.id.clone().unwrap_or_default(),
+								name: self.state.me.name.clone().unwrap_or_default(),
+								owner: self.state.me.owner.clone().unwrap_or_default(),
+							});
+							self.pupynet.send(&addr, cmd).unwrap();
+						}
+					}
+				}
 			}
 		}
 	}

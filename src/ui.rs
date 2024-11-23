@@ -20,7 +20,7 @@ pub fn peers_table(state: &State) -> Item {
 					td2(&peer.id),
 					td2(&peer.name.clone()),
 					td2(&peer.addr.clone().unwrap_or_default()),
-				])
+				]).cursor("pointer")
 			})
 		)
 	])

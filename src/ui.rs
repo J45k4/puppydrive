@@ -9,6 +9,7 @@ pub fn peers_table(state: &State) -> Item {
 	table([
 		thead([
 			tr([
+				th(text("ID")),
 				th(text("NAME")),
 				th(text("IP")),
 			])
@@ -16,6 +17,7 @@ pub fn peers_table(state: &State) -> Item {
 		tbody(
 			state.peers.iter().map(|peer| {
 				tr([
+					td2(&peer.id),
 					td2(&peer.name.clone()),
 					td2(&peer.addr.clone().unwrap_or_default()),
 				])

@@ -29,8 +29,7 @@ pub enum PupynetEvent {
 pub trait Pupynet {
 	fn connect(&mut self, addr: &str) -> anyhow::Result<()>;
 	async fn bind<A: AsRef<str>>(&mut self, addr: A) -> anyhow::Result<()>;
-	fn send(&mut self, addr: &str, cmd: PeerCmd) -> anyhow::Result<()>;
-	async fn udp_broadcast(&mut self, addr: &str, cmd: PeerCmd);
+	async fn send(&mut self, addr: &str, cmd: PeerCmd) -> anyhow::Result<()>;
 	async fn wait(&mut self) -> Option<Event>;
 }
 
@@ -41,18 +40,18 @@ pub struct PupynetImpl {
 	protocols: HashMap<String, PupynetProtocol>,
 	new_events: VecDeque<Event>,
 	udb_sockets: HashMap<u16, Arc<UdpSocket>>,
-	broadcast_socket: Option<Arc<UdpSocket>>
+	udp_socket: Arc<UdpSocket>
 }
 
 impl PupynetImpl {
 	pub async fn new() -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		let broadcast_socket = match UdpSocket::bind("0.0.0.0:7764").await {
+		let udp_socket = match UdpSocket::bind("0.0.0.0:7764").await {
 			Result::Ok(socket) => {
 				log::info!("bound broadcast socket");
 				let socket = Arc::new(socket);
 				let tx = tx.clone();
-				socket.set_broadcast(true);
+				socket.set_broadcast(true).unwrap();
 				{
 					let broadcast_socket = socket.clone();
 					tokio::spawn(async move {
@@ -65,13 +64,13 @@ impl PupynetImpl {
 						}
 					});
 				}
-				Some(socket)
+				socket
 			},
 			Err(err) => {
 				log::error!("error binding broadcast socket: {}", err);
 				let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
 				socket.set_broadcast(true).unwrap();
-				Some(Arc::new(socket))
+				Arc::new(socket)
 			},
 		};
 
@@ -83,7 +82,7 @@ impl PupynetImpl {
 			protocols: HashMap::new(),
 			new_events: VecDeque::new(),
 			udb_sockets: HashMap::new(),
-			broadcast_socket
+			udp_socket
 		}
 	}
 }
@@ -124,8 +123,13 @@ impl Pupynet for PupynetImpl {
 		bail!("unsupported protocol {}", addr);
 	}
 
-	fn send(&mut self, addr: &str, cmd: PeerCmd) -> anyhow::Result<()> {
+	async fn send(&mut self, addr: &str, cmd: PeerCmd) -> anyhow::Result<()> {
 		if addr.starts_with("udp://") {
+			let data = cmd.serialize();
+			let addr = addr.replace("udp://", "");
+			let addr = addr.parse::<std::net::SocketAddr>()?;
+			self.udp_socket.send_to(&data, addr).await.unwrap();
+
 			return Ok(());
 		}
 
@@ -138,16 +142,6 @@ impl Pupynet for PupynetImpl {
 		let cmd = PeerConnCmd::Send(data);
 		tx.send(cmd).map_err(|err| anyhow::anyhow!(err))?;
 		Ok(())
-	}
-
-	async fn udp_broadcast(&mut self, addr: &str, cmd: PeerCmd) {
-		let socket = match self.broadcast_socket {
-			Some(ref socket) => socket,
-			None => return
-		};
-		log::info!("[{}] broadcasting cmd: {:?}", addr, cmd);
-		let data = cmd.serialize();
-		socket.send_to(&data, addr).await;
 	}
 
 	async fn wait(&mut self) -> Option<Event> {

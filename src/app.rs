@@ -48,6 +48,7 @@ impl<P: Pupynet> App<P> {
 				log::error!("connect failed: addr: {}, err: {}", addr, err);
 			}
 			Event::PeerConnected { addr } => {
+				log::info!("[{}] connected", addr);
 				let peer = self.state.get_peer_with_addr(&addr);
 				peer.introduced = true;
 				let cmd = PeerCmd::Introduce(Introduce {
@@ -55,7 +56,7 @@ impl<P: Pupynet> App<P> {
 					name: self.state.me.name.clone(),
 					owner: self.state.me.owner.clone().unwrap_or_default(),
 				});
-				self.pupynet.send(&addr, cmd).unwrap();
+				self.pupynet.send(&addr, cmd).await.unwrap();
 			}
 			Event::PeerDisconnected { addr } => {
 				let peer = self.state.get_peer_with_addr(&addr);
@@ -82,6 +83,7 @@ impl<P: Pupynet> App<P> {
 						}
 
 						let peer = self.state.get_peer_with_addr(&addr);
+						peer.id = introduce.id;
 						peer.name = introduce.name;
 						if !peer.introduced {
 							peer.introduced = true;
@@ -90,7 +92,7 @@ impl<P: Pupynet> App<P> {
 								name: self.state.me.name.clone(),
 								owner: self.state.me.owner.clone().unwrap_or_default(),
 							});
-							self.pupynet.send(&addr, cmd).unwrap();
+							self.pupynet.send(&addr, cmd).await.unwrap();
 						}
 					}
 					PeerCmd::Hello => {
@@ -107,7 +109,6 @@ impl<P: Pupynet> App<P> {
 				event = self.wgui.next() => {
 					match event {
 						Some(e) => {
-							println!("Event: {:?}", e);
 							self.handle_wgui_event(e).await;
 						},
 						None => {
@@ -134,7 +135,7 @@ impl<P: Pupynet> App<P> {
 						owner: self.state.me.owner.clone().unwrap_or_default(),
 					};
 					let cmd = PeerCmd::Introduce(introduce);
-					self.pupynet.udp_broadcast("255.255.255.255:7764", cmd).await;
+					self.pupynet.send("udp://255.255.255.255:7764", cmd).await;
 				}
 			}
 			self.render_ui().await;

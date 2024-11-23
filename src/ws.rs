@@ -110,7 +110,8 @@ pub async fn bind(addr: String, event_tx: mpsc::UnboundedSender<PupynetEvent>) -
 		log::info!("WebSocket connection established: {}", addr);
 		let (tx, rx) = mpsc::unbounded_channel();
 		let event_tx = event_tx.clone();
-		if let Err(err) = event_tx.send(PupynetEvent::PeerConnected { addr: addr.to_string(), tx: tx }) {
+		let addr = format!("ws://{}", addr);
+		if let Err(err) = event_tx.send(PupynetEvent::PeerConnected { addr: addr.clone(), tx: tx }) {
 			log::error!("error sending event: {}", err);
 			break;
 		}

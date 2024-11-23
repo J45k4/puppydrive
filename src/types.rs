@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 
 use crate::protocol::Introduce;
+use crate::protocol::PeerCmd;
 
 pub type SharedState = Rc<RefCell<State>>;
 
@@ -33,8 +34,8 @@ impl State {
 
 #[derive(Debug, Default)]
 pub struct Peer {
-	pub id: Option<String>,
-	pub name: Option<String>,
+	pub id: String,
+	pub name: String,
 	pub owner: Option<String>,
     pub addr: Option<String>,
 	pub introduced: bool,
@@ -68,47 +69,6 @@ pub struct FileInfo {
     pub path: String,
     pub size: u64,
     pub hash: Option<String>,
-}
-
-#[derive(Debug)]
-pub enum PeerCmd {
-    ReadFile {
-        node_id: String,
-        path: String,
-        offset: u64,
-        length: u64,
-    },
-    WriteFile {
-        node_id: String,
-        path: String,
-        offset: u64,
-        data: Vec<u8>,
-    },
-    RemoveFile {
-        node_id: String,
-        path: String,
-    },
-    CreateFolder {
-        node_id: String,
-        path: String,
-    },
-    RenameFolder {
-        node_id: String,
-        path: String,
-        new_name: String,
-    },
-    RemoveFolder {
-        node_id: String,
-        path: String,
-    },
-    ListFolderContents {
-        node_id: String,
-        path: String,
-        offset: u64,
-        length: u64,
-        recursive: bool,
-    },
-	Introduce(Introduce)
 }
 
 #[derive(Debug)]
@@ -161,7 +121,7 @@ pub enum Event {
 	PeerDisconnected {
 		addr: String
 	},
-	PeerData {
+	PeerCmd {
 		addr: String,
 		cmd: PeerCmd
 	},

@@ -16,7 +16,7 @@ pub fn peers_table(state: &State) -> Item {
 		tbody(
 			state.peers.iter().map(|peer| {
 				tr([
-					td2(&peer.name.clone().unwrap_or_default()),
+					td2(&peer.name.clone()),
 					td2(&peer.addr.clone().unwrap_or_default()),
 				])
 			})

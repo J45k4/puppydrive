@@ -1,7 +1,5 @@
 use std::collections::VecDeque;
 
-use crate::types::PeerCmd;
-
 pub const INTRODUCE_CMD: u16 = 1;
 pub const WRITE_FILE_CMD: u16 = 2;
 pub const READ_FILE_CMD: u16 = 3;
@@ -15,6 +13,75 @@ pub struct Introduce {
 	pub id: String,
 	pub name: String,
 	pub owner: String,
+}
+
+#[derive(Debug)]
+pub enum PeerCmd {
+    ReadFile {
+        node_id: String,
+        path: String,
+        offset: u64,
+        length: u64,
+    },
+    WriteFile {
+        node_id: String,
+        path: String,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    RemoveFile {
+        node_id: String,
+        path: String,
+    },
+    CreateFolder {
+        node_id: String,
+        path: String,
+    },
+    RenameFolder {
+        node_id: String,
+        path: String,
+        new_name: String,
+    },
+    RemoveFolder {
+        node_id: String,
+        path: String,
+    },
+    ListFolderContents {
+        node_id: String,
+        path: String,
+        offset: u64,
+        length: u64,
+        recursive: bool,
+    },
+	Introduce(Introduce),
+	Hello
+}
+
+impl PeerCmd {
+	pub fn serialize(&self) -> Vec<u8> {
+		match self {
+			PeerCmd::Introduce(args) => {
+				let id_len_bytes = (args.id.len() as u16).to_le_bytes();
+				let id_bytes = args.id.as_bytes();
+				let name_len_bytes = (args.name.len() as u16).to_le_bytes();
+				let name_bytes = args.name.as_bytes();
+				let owner_len_bytes = (args.owner.len() as u16).to_le_bytes();
+				let owner_bytes = args.owner.as_bytes();
+				let payload_size = 2 + id_bytes.len() + 2 + name_bytes.len() + 2 + owner_bytes.len();
+				let mut res = Vec::with_capacity(6 + payload_size);
+				res.extend_from_slice(&INTRODUCE_CMD.to_le_bytes());
+				res.extend_from_slice(&(payload_size as u32).to_le_bytes());
+				res.extend_from_slice(&id_len_bytes);
+				res.extend_from_slice(id_bytes);
+				res.extend_from_slice(&name_len_bytes);
+				res.extend_from_slice(name_bytes);
+				res.extend_from_slice(&owner_len_bytes);
+				res.extend_from_slice(owner_bytes);
+				res
+			}
+			_ => todo!()
+		}
+	}
 }
 
 struct ByteEater<'a> {
@@ -39,8 +106,6 @@ impl<'a> ByteEater<'a> {
 		String::from_utf8(s).unwrap()
 	}
 }
-
-
 
 pub struct PupynetProtocol {
 	buffer: Vec<u8>,
@@ -90,31 +155,6 @@ impl PupynetProtocol {
 
 	pub fn next(&mut self) -> Option<PeerCmd> {
 		self.cmds.pop_front()
-	}
-
-	pub fn encode(&mut self, cmd: PeerCmd) -> Vec<u8> {
-		match cmd {
-			PeerCmd::Introduce(args) => {
-				let id_len_bytes = (args.id.len() as u16).to_le_bytes();
-				let id_bytes = args.id.as_bytes();
-				let name_len_bytes = (args.name.len() as u16).to_le_bytes();
-				let name_bytes = args.name.as_bytes();
-				let owner_len_bytes = (args.owner.len() as u16).to_le_bytes();
-				let owner_bytes = args.owner.as_bytes();
-				let payload_size = 2 + id_bytes.len() + 2 + name_bytes.len() + 2 + owner_bytes.len();
-				let mut res = Vec::with_capacity(6 + payload_size);
-				res.extend_from_slice(&INTRODUCE_CMD.to_le_bytes());
-				res.extend_from_slice(&(payload_size as u32).to_le_bytes());
-				res.extend_from_slice(&id_len_bytes);
-				res.extend_from_slice(id_bytes);
-				res.extend_from_slice(&name_len_bytes);
-				res.extend_from_slice(name_bytes);
-				res.extend_from_slice(&owner_len_bytes);
-				res.extend_from_slice(owner_bytes);
-				res
-			}
-			_ => todo!()
-		}
 	}
 }
 

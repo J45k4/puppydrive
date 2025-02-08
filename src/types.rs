@@ -3,6 +3,9 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
+use chrono::DateTime;
+use chrono::Utc;
+
 use crate::protocol::Introduce;
 use crate::protocol::PeerCmd;
 
@@ -134,4 +137,22 @@ pub enum Event {
 pub enum PeerConnCmd {
 	Close,
 	Send(Vec<u8>)
+}
+
+#[derive(Debug, Default)]
+pub struct FileEntry {
+	pub id: i64,
+	pub hash: Option<[u8; 32]>,
+	pub size: u64,
+	pub first_datetime: Option<DateTime<Utc>>,
+	pub last_datetime: Option<DateTime<Utc>>,
+}
+
+pub struct FileLocation {
+	pub id: i64,
+	pub file_entry_id: i64,
+	pub timestamp: DateTime<Utc>,
+	pub created_at: Option<DateTime<Utc>>,
+	pub modified_at: Option<DateTime<Utc>>,
+	pub accessed_at: Option<DateTime<Utc>>,
 }

@@ -6,16 +6,21 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "a4e55c81a850c17cc97c4b68f31a3a82f96b5a46" }
 log = "0.4"
 simple_logger = "5"
-tokio-tungstenite = "*"
-hyper-tungstenite = "*"
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "*", features = ["full"] }
-http-body-util = "*"
 anyhow = "1"
 futures-util = "*"
-bincode = "1"
 gethostname = "0.5"
 uuid =  { version = "1", features = ["v4"] }
+rusqlite = { version = "0.33", features = ["bundled", "chrono"] }
+axum = "0.8"
+walkdir = "2"
+chrono = "0.4"
+sha2 = { version = "0.10", optional = true }
+ring = { version = "0.17", optional = true }
+rayon = { version = "1" }
+
+[features]
+default = ["sha2"]
+ring = ["dep:ring"]
+# rayon = ["dep:rayon"]

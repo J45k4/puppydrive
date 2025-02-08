@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use chrono::DateTime;
@@ -141,7 +142,6 @@ pub enum PeerConnCmd {
 
 #[derive(Debug, Default)]
 pub struct FileEntry {
-	pub id: i64,
 	pub hash: Option<[u8; 32]>,
 	pub size: u64,
 	pub first_datetime: Option<DateTime<Utc>>,
@@ -149,8 +149,8 @@ pub struct FileEntry {
 }
 
 pub struct FileLocation {
-	pub id: i64,
-	pub file_entry_id: i64,
+	pub path: PathBuf,
+	pub hash: Option<[u8; 32]>,
 	pub timestamp: DateTime<Utc>,
 	pub created_at: Option<DateTime<Utc>>,
 	pub modified_at: Option<DateTime<Utc>>,

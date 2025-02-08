@@ -17,19 +17,19 @@ const MIGRATIONS: &[Migration] = &[
 		name: "init_database",
 		sql: r"
 		create table file_entries (
-			id integer primary key,
+			hash blob null unique,
 			size integer not null,
-			hash text not null,
 			first_datetime timestamp null,
-			latest_datetime timestamp null,
-		};
+			latest_datetime timestamp null
+		);
 		create table file_locations (
 			id integer primary key,
-			file_entry_id integer not null,
+			path text not null,
+			file_entry_hash blob null references file_entries(id),
 			created_at timestamp null,
 			modified_at timestamp null,
-			accessed_at timestamp null,
-		};
+			accessed_at timestamp null
+		);
 		"
 	}
 ];
@@ -109,55 +109,26 @@ impl DB {
 		}
 	}
 
-	pub fn save_file_entry(&self, entry: &mut FileEntry) -> anyhow::Result<()> {
-		if entry.id == 0 {
-			self.conn.execute(
-				"INSERT INTO file_entries (size, hash, first_datetime) VALUES (?1, ?2, ?3)",
-				&[
-					&entry.size as &dyn ToSql,
-					&entry.hash as &dyn ToSql,
-					&entry.first_datetime as &dyn ToSql,
-				],
+	pub fn save_file_metadatas(&mut self, entries: &mut [FileEntry]) -> anyhow::Result<()> {
+        // Start a transaction.
+        let tx = self.conn.transaction()?;
+		{
+			// Prepare the statements once to reuse them for each entry.
+			let mut insert_stmt = tx.prepare(
+				"INSERT INTO file_entries (size, hash, first_datetime) VALUES (?1, ?2, ?3)"
 			)?;
-			entry.id = self.conn.last_insert_rowid();
-		} else {
-			self.conn.execute(
-				"UPDATE file_entries SET size = ?1, hash = ?2, first_datetime = ?3 WHERE id = ?4",
-				&[
-					&entry.size as &dyn ToSql,
-					&entry.hash as &dyn ToSql,
-					&entry.first_datetime as &dyn ToSql,
-					&entry.id as &dyn ToSql,
-				],
-			)?;
-		}
-		Ok(())
-	}
 
-	pub fn save_file_location(&self, location: &mut FileLocation) -> anyhow::Result<()> {
-		if location.id == 0 {
-			self.conn.execute(
-				"INSERT INTO file_locations (file_entry_id, created_at, modified_at, accessed_at) VALUES (?1, ?2, ?3, ?4)",
-				&[
-					&location.file_entry_id as &dyn ToSql,
-					&location.created_at as &dyn ToSql,
-					&location.modified_at as &dyn ToSql,
-					&location.accessed_at as &dyn ToSql,
-				],
-			)?;
-			location.id = self.conn.last_insert_rowid();
-		} else {
-			self.conn.execute(
-				"UPDATE file_locations SET file_entry_id = ?1, created_at = ?2, modified_at = ?3, accessed_at = ?4 WHERE id = ?5",
-				&[
-					&location.file_entry_id as &dyn ToSql,
-					&location.created_at as &dyn ToSql,
-					&location.modified_at as &dyn ToSql,
-					&location.accessed_at as &dyn ToSql,
-					&location.id as &dyn ToSql,
-				],
-			)?;
+			// Process each entry in the batch.
+			for entry in entries.iter_mut() {
+				insert_stmt.execute(&[
+					&entry.size as &dyn ToSql,
+					&entry.hash as &dyn ToSql,
+					&entry.first_datetime as &dyn ToSql,
+				])?;
+			}
 		}
-		Ok(())
-	}
+        // Commit the transaction.
+        tx.commit()?;
+        Ok(())
+    }
 }

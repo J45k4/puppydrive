@@ -22,7 +22,7 @@ async fn main() {
 			}
 			args::Command::Scan { path } => {
 				log::info!("scanning {}", path);
-				//scan::scan(&path);
+				scan::scan(&path, db::DB::new());
 			}
 		}
 		return;

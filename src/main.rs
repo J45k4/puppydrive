@@ -14,6 +14,11 @@ async fn main() {
 	simple_logger::init_with_level(log::Level::Info).unwrap();
 	let args = args::Args::parse();
 
+	#[cfg(feature = "rayon")]
+	log::info!("rayon enabled");
+	#[cfg(feature = "ring")]
+	log::info!("ring enabled");
+
 	run_migrations().unwrap();
 
 	if let Some(command) = args.command {

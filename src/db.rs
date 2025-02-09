@@ -17,8 +17,9 @@ const MIGRATIONS: &[Migration] = &[
 		name: "init_database",
 		sql: r"
 		create table file_entries (
-			hash blob null unique,
+			hash blob not null unique primary key,
 			size integer not null,
+			mime_type text null,
 			first_datetime timestamp null,
 			latest_datetime timestamp null
 		);
@@ -104,40 +105,4 @@ pub fn run_migrations() -> anyhow::Result<()> {
 
 pub fn open_db() -> Connection {
 	Connection::open("puppydrive.db").unwrap()
-}
-
-pub struct DB {
-	conn: Connection
-}
-
-impl DB {
-	pub fn new() -> Self {
-		let conn = Connection::open("puppydrive.db").unwrap();
-		Self {
-			conn
-		}
-	}
-
-	pub fn save_file_metadatas(&mut self, entries: &mut [FileEntry]) -> anyhow::Result<()> {
-        // Start a transaction.
-        let tx = self.conn.transaction()?;
-		{
-			// Prepare the statements once to reuse them for each entry.
-			let mut insert_stmt = tx.prepare(
-				"INSERT INTO file_entries (size, hash, first_datetime) VALUES (?1, ?2, ?3)"
-			)?;
-
-			// Process each entry in the batch.
-			for entry in entries.iter_mut() {
-				insert_stmt.execute(&[
-					&entry.size as &dyn ToSql,
-					&entry.hash as &dyn ToSql,
-					&entry.first_datetime as &dyn ToSql,
-				])?;
-			}
-		}
-        // Commit the transaction.
-        tx.commit()?;
-        Ok(())
-    }
 }

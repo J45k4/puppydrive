@@ -153,6 +153,7 @@ pub struct FileLocation {
 	pub path: PathBuf,
 	pub hash: Option<[u8; 32]>,
 	pub size: u64,
+	pub mime_type: Option<String>,
 	pub timestamp: DateTime<Utc>,
 	pub created_at: Option<DateTime<Utc>>,
 	pub modified_at: Option<DateTime<Utc>>,
@@ -164,6 +165,7 @@ impl PartialEq for FileLocation {
 		self.path == other.path && 
 		self.hash == other.hash && 
 		self.size == other.size &&
+		self.mime_type == other.mime_type &&
 		self.created_at == other.created_at &&
 		self.modified_at == other.modified_at &&
 		self.accessed_at == other.accessed_at

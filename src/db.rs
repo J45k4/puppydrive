@@ -23,13 +23,18 @@ const MIGRATIONS: &[Migration] = &[
 			latest_datetime timestamp null
 		);
 		create table file_locations (
-			id integer primary key,
+			node_id bytes not null,
 			path text not null,
-			file_entry_hash blob null references file_entries(id),
+			hash blob null,
+			size integer not null,
+			timestamp timestamp not null,
 			created_at timestamp null,
 			modified_at timestamp null,
-			accessed_at timestamp null
+			accessed_at timestamp null,
+			primary key (node_id, path)
 		);
+		CREATE INDEX IF NOT EXISTS idx_file_locations_path ON file_locations(path);
+		CREATE INDEX IF NOT EXISTS idx_file_locations_hash ON file_locations(hash);
 		"
 	}
 ];
@@ -95,6 +100,10 @@ pub fn run_migrations() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+pub fn open_db() -> Connection {
+	Connection::open("puppydrive.db").unwrap()
 }
 
 pub struct DB {

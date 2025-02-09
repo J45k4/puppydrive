@@ -1,4 +1,5 @@
 use clap::Parser;
+use db::open_db;
 use db::run_migrations;
 
 mod args;
@@ -22,7 +23,9 @@ async fn main() {
 			}
 			args::Command::Scan { path } => {
 				log::info!("scanning {}", path);
-				scan::scan(&path, db::DB::new());
+				let conn = open_db();
+				let res = scan::scan(123456, &path, conn).unwrap();
+				log::info!("inserted {} files, updated {} and removed {} files in {:?}", res.inserted_count, res.updated_count, res.removed_count, res.duration);
 			}
 		}
 		return;

@@ -1,6 +1,16 @@
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::routing::get;
+use axum::Json;
+use axum::Router;
 use clap::Parser;
 use db::open_db;
 use db::run_migrations;
+use rusqlite::Connection;
+use serde_json::json;
+use serde_json::Value;
+use tokio::sync::Mutex;
 
 mod args;
 mod types;
@@ -8,6 +18,10 @@ mod protocol;
 mod timer;
 mod scan;
 mod db;
+
+pub struct Context {
+	pub db: Mutex<Connection>
+}
 
 #[tokio::main]
 async fn main() {
@@ -35,4 +49,20 @@ async fn main() {
 		}
 		return;
 	}
+
+	let ctx = Context {
+		db: Mutex::new(open_db())
+	};
+	let ctx = Arc::new(ctx);
+
+	let app = Router::new()
+		.route("/api/v1/files", get(search_files)).with_state(ctx.clone());
+
+	let listener = tokio::net::TcpListener::bind("0.0.0.0:5225").await.unwrap();
+	axum::serve(listener, app).await.unwrap();
+}
+
+async fn search_files(State(ctx): State<Arc<Context>>) -> Json<Value> {
+	let db = ctx.db.lock().await;
+	Json(json!([]))
 }

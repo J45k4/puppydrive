@@ -11,7 +11,8 @@ use rusqlite::ToSql;
 use walkdir::WalkDir;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
-use crate::types::FileLocation;
+
+use crate::db::FileLocation;
 
 #[cfg(feature = "ring")]
 fn sha256_hash<R: Read>(mut reader: R) -> io::Result<[u8; 32]> {

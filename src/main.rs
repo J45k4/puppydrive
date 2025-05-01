@@ -56,13 +56,26 @@ async fn main() {
 	let ctx = Arc::new(ctx);
 
 	let app = Router::new()
+		.route("/api/v1/mime_types", get(get_mime_types)).with_state(ctx.clone())
 		.route("/api/v1/files", get(search_files)).with_state(ctx.clone());
 
 	let listener = tokio::net::TcpListener::bind("0.0.0.0:5225").await.unwrap();
 	axum::serve(listener, app).await.unwrap();
 }
 
-async fn search_files(State(ctx): State<Arc<Context>>) -> Json<Value> {
+async fn get_mime_types(State(ctx): State<Arc<Context>>) -> Json<Value> {
 	let db = ctx.db.lock().await;
+	let mut stmt = db.prepare("SELECT DISTINCT mime_type FROM file_entries WHERE mime_type IS NOT NULL").unwrap();
+	let rows = stmt.query_map((), |row| row.get::<_, String>(0)).unwrap();
+
+	let mut mime_types = Vec::new();
+	for mime_type in rows {
+		mime_types.push(mime_type.unwrap());
+	}
+	Json(json!(mime_types))
+}
+
+async fn search_files(State(ctx): State<Arc<Context>>) -> Json<Value> {
+	let _db = ctx.db.lock().await;
 	Json(json!([]))
 }

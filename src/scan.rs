@@ -16,18 +16,18 @@ use crate::db::FileLocation;
 
 #[cfg(feature = "ring")]
 fn sha256_hash<R: Read>(mut reader: R) -> io::Result<[u8; 32]> {
-    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buffer = [0u8; 4096];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 { break; }
-        context.update(&buffer[..count]);
-    }
-    // Finalize the hash and copy it into a fixed-size array.
-    let digest: ring::digest::Digest = context.finish();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(digest.as_ref());
-    Ok(hash)
+	let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+	let mut buffer = [0u8; 4096];
+	loop {
+		let count = reader.read(&mut buffer)?;
+		if count == 0 { break; }
+		context.update(&buffer[..count]);
+	}
+	// Finalize the hash and copy it into a fixed-size array.
+	let digest: ring::digest::Digest = context.finish();
+	let mut hash = [0u8; 32];
+	hash.copy_from_slice(digest.as_ref());
+	Ok(hash)
 }
 
 #[cfg(all(not(feature = "ring"), feature = "sha2"))]
@@ -49,7 +49,7 @@ fn to_datetime(m: std::io::Result<std::time::SystemTime>) -> Option<chrono::Date
 
 fn handle_path<P: AsRef<Path>>(path: P) -> FileLocation {
 	let full_path = canonicalize(path.as_ref()).unwrap();
-
+	log::info!("processing {}", full_path.display());
 	let mut file = std::fs::File::open(path).unwrap();
 	let m = file.metadata().unwrap();
 	let created_at = to_datetime(m.created());
@@ -97,122 +97,142 @@ pub fn scan<P: AsRef<Path>>(node_id: u128, path: P, mut conn: Connection) -> Res
 	let mut removed_count = 0;
 	let path = path.as_ref().to_path_buf();
 	let absolute_path = canonicalize(&path).unwrap();
-	// conn.execute_batch("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;").unwrap();
 	let tx = conn.transaction().unwrap();
-	{
-		let mut file_locations_stmt = match tx.prepare(
-			"SELECT path, hash, size, timestamp, created_at, modified_at, accessed_at FROM file_locations where path like ?"
-		) {
-			Ok(stmt) => stmt,
-			Err(err) => return Err(format!("error preparing statement: {:?}", err))
-		};
-		let file_locations: HashMap<PathBuf, FileLocation> = match file_locations_stmt.query_map([&(absolute_path.to_string_lossy() + "%")], |row| {
-			Ok(FileLocation {
-				path: PathBuf::from(row.get::<_, String>(0)?),
-				hash: row.get(1)?,
-				size: row.get(2)?,
-				mime_type: None,
-				timestamp: row.get(3)?,
-				created_at: row.get(4)?,
-				modified_at: row.get(5)?,
-				accessed_at: row.get(6)?
-			})
-		}) {
-			Ok(iter) => iter.filter_map(Result::ok).map(|file_location| (file_location.path.to_path_buf(), file_location)).collect(),
-			Err(err) => return Err(format!("error querying file locations: {:?}", err))
-		};
 
-		let scan_timer = std::time::Instant::now();
-		let scanned_file_locations = WalkDir::new(absolute_path)
+	{
+		// load all existing file_locations into a map
+		let mut file_locations_stmt = tx.prepare(
+			"SELECT path, hash, size, timestamp, created_at, modified_at, accessed_at \
+			FROM file_locations \
+			WHERE path LIKE ?"
+		).map_err(|e| format!("error preparing statement: {:?}", e))?;
+		let existing: HashMap<PathBuf, FileLocation> = file_locations_stmt
+			.query_map([&(absolute_path.to_string_lossy().to_string() + "%")], |row| {
+				Ok(FileLocation {
+					path: PathBuf::from(row.get::<_, String>(0)?),
+					hash: row.get(1)?,
+					size: row.get(2)?,
+					mime_type: None,          // we don’t need mime here
+					timestamp: row.get(3)?,
+					created_at: row.get(4)?,
+					modified_at: row.get(5)?,
+					accessed_at: row.get(6)?,
+				})
+			})
+			.map_err(|e| format!("error querying file locations: {:?}", e))?
+			.filter_map(Result::ok)
+			.map(|fl| (fl.path.clone(), fl))
+			.collect();
+
+		// scan disk
+		let entries = WalkDir::new(&absolute_path)
 			.into_iter()
 			.filter_map(|e| e.ok())
-			.filter_map(|entry| {
-				if entry.file_type().is_file() {
-					Some(entry)
-				} else {
-					None        
-				}
-			})
-			.collect::<Vec<_>>()
-			.into_iter();
-		log::info!("scanning {} files in {:?}", scanned_file_locations.len(), scan_timer.elapsed());
+			.filter(|e| e.file_type().is_file())
+			.collect::<Vec<_>>();
 
 		#[cfg(feature = "rayon")]
-		let scanned_file_locations = scanned_file_locations.par_bridge();
+		let mapped = entries.par_iter().map(|entry| (entry.path().to_path_buf(), entry.clone()));
+		#[cfg(not(feature = "rayon"))]
+		let mapped = entries.iter().map(|entry| (entry.path().to_path_buf(), entry.clone()));
 
-		let hash_timer = std::time::Instant::now();
-		let scanned_file_locations = scanned_file_locations.map(|entry| {
-				let file_location = handle_path(entry.path());
-				(file_location.path.to_path_buf(), file_location)
+		let mut scanned: HashMap<PathBuf, FileLocation> = mapped
+			.map(|(pbuf, entry)| {
+				// 1) quick metadata check
+				let meta = std::fs::metadata(&pbuf).unwrap();
+				let created_at  = to_datetime(meta.created());
+				let modified_at = to_datetime(meta.modified());
+				let accessed_at = to_datetime(meta.accessed());
+				let size = meta.len();
+
+				if let Some(prev) = existing.get(&pbuf) {
+					if prev.size == size
+						&& prev.created_at == created_at
+						&& prev.modified_at == modified_at
+						&& prev.accessed_at == accessed_at
+					{
+						// unchanged → reuse previous hash & mime; only update timestamp
+						return (pbuf.clone(), FileLocation {
+							path: pbuf.clone(),
+							hash: prev.hash,
+							size,
+							mime_type: prev.mime_type.clone(),
+							timestamp: Utc::now(),
+							created_at,
+							modified_at,
+							accessed_at,
+						});
+					}
+				}
+
+				// metadata changed (or new file) → do full read+hash
+				let fl = handle_path(&pbuf);
+				(pbuf.clone(), fl)
 			})
-			.collect::<HashMap<PathBuf, FileLocation>>();
-		log::info!("hashed {} files in {:?}", scanned_file_locations.len(), hash_timer.elapsed());
+			.collect();
 
-		let mut delete_file_location = tx.prepare(DELETE_FILE_LOCATION).unwrap();
-		for file_location in file_locations.values() {
-			if !scanned_file_locations.contains_key(&file_location.path) {
-				delete_file_location.execute(&[&node_id.to_le_bytes() as &dyn ToSql, &file_location.path.to_string_lossy() as &dyn ToSql]).unwrap();
+		// remove deleted files
+		let mut delete_stmt = tx.prepare(DELETE_FILE_LOCATION).unwrap();
+		for old in existing.keys() {
+			if !scanned.contains_key(old) {
+				delete_stmt.execute(&[
+					&node_id.to_le_bytes() as &dyn ToSql,
+					&old.to_string_lossy() as &dyn ToSql,
+				]).unwrap();
 				removed_count += 1;
 			}
 		}
-		let mut insert_file_location = tx.prepare(INSERT_FILE_LOCATION).unwrap();
-		let mut update_file_location = tx.prepare(UPDATE_FILE_LOCATION).unwrap();
-		for scanned_file_location in scanned_file_locations.values() {
-			match file_locations.get(&scanned_file_location.path) {
-				Some(prev) => {
-					if scanned_file_location == prev { continue; }
-					update_file_location.execute(&[
-						&scanned_file_location.hash as &dyn ToSql,
-						&scanned_file_location.size as &dyn ToSql,
-						&scanned_file_location.timestamp as &dyn ToSql,
-						&scanned_file_location.created_at as &dyn ToSql,
-						&scanned_file_location.modified_at as &dyn ToSql,
-						&scanned_file_location.accessed_at as &dyn ToSql,
-						&node_id.to_le_bytes() as &dyn ToSql,
-						&scanned_file_location.path.to_string_lossy() as &dyn ToSql
-					]).unwrap();
-					updated_count += 1;
-				},
-				None => {
-					insert_file_location.execute(&[
-						&node_id.to_le_bytes() as &dyn ToSql,
-						&scanned_file_location.path.to_string_lossy() as &dyn ToSql,
-						&scanned_file_location.hash as &dyn ToSql,
-						&scanned_file_location.size as &dyn ToSql,
-						&scanned_file_location.timestamp as &dyn ToSql,
-						&scanned_file_location.created_at as &dyn ToSql,
-						&scanned_file_location.modified_at as &dyn ToSql,
-						&scanned_file_location.accessed_at as &dyn ToSql
-					]).unwrap();
-					inserted_count += 1;
+
+		// insert or update each scanned file
+		let mut insert_stmt = tx.prepare(INSERT_FILE_LOCATION).unwrap();
+		let mut update_stmt = tx.prepare(UPDATE_FILE_LOCATION).unwrap();
+		for (path, fl) in scanned.iter() {
+			if let Some(prev) = existing.get(path) {
+				if fl == prev {
+					// completely identical (including timestamp) → skip
+					continue;
 				}
+				// else: update hash/size/timestamps
+				update_stmt.execute(&[
+					&fl.hash as &dyn ToSql,
+					&fl.size as &dyn ToSql,
+					&fl.timestamp as &dyn ToSql,
+					&fl.created_at as &dyn ToSql,
+					&fl.modified_at as &dyn ToSql,
+					&fl.accessed_at as &dyn ToSql,
+					&node_id.to_le_bytes() as &dyn ToSql,
+					&fl.path.to_string_lossy() as &dyn ToSql,
+				]).unwrap();
+				updated_count += 1;
+			} else {
+				// new file
+				insert_stmt.execute(&[
+					&node_id.to_le_bytes() as &dyn ToSql,
+					&fl.path.to_string_lossy() as &dyn ToSql,
+					&fl.hash as &dyn ToSql,
+					&fl.size as &dyn ToSql,
+					&fl.timestamp as &dyn ToSql,
+					&fl.created_at as &dyn ToSql,
+					&fl.modified_at as &dyn ToSql,
+					&fl.accessed_at as &dyn ToSql,
+				]).unwrap();
+				inserted_count += 1;
 			}
-			
 		}
 
-		let mut upsert_file_entry = tx.prepare(UPSERT_FILE_ENTRY).unwrap();
-		for file_location in scanned_file_locations.values() {
-			// Collect the available timestamps into a Vec.
-			let timestamps: Vec<_> = [
-				file_location.created_at,
-				file_location.modified_at,
-				file_location.accessed_at,
-			]
-			.iter()
-			.copied()
-			.flatten() // Remove any None values.
-			.collect();
-		
-			// Compute the earliest and latest dates if any timestamps exist.
-			let first_datetime = timestamps.iter().min().copied();
-			let latest_datetime = timestamps.iter().max().copied();
-		
-			upsert_file_entry.execute(&[
-				&file_location.hash as &dyn ToSql,
-				&file_location.size as &dyn ToSql,
-				&file_location.mime_type as &dyn ToSql,
-				&first_datetime as &dyn ToSql,
-				&latest_datetime as &dyn ToSql,
+		// upsert into file_entries as before…
+		let mut upsert_stmt = tx.prepare(UPSERT_FILE_ENTRY).unwrap();
+		for fl in scanned.values() {
+			let timestamps: Vec<_> = [fl.created_at, fl.modified_at, fl.accessed_at]
+				.iter().copied().flatten().collect();
+			let first_dt  = timestamps.iter().min().copied();
+			let latest_dt = timestamps.iter().max().copied();
+			upsert_stmt.execute(&[
+				&fl.hash as &dyn ToSql,
+				&fl.size as &dyn ToSql,
+				&fl.mime_type as &dyn ToSql,
+				&first_dt as &dyn ToSql,
+				&latest_dt as &dyn ToSql,
 			]).unwrap();
 		}
 	}
@@ -222,6 +242,6 @@ pub fn scan<P: AsRef<Path>>(node_id: u128, path: P, mut conn: Connection) -> Res
 		updated_count,
 		inserted_count,
 		removed_count,
-		duration: timer.elapsed()
+		duration: timer.elapsed(),
 	})
 }

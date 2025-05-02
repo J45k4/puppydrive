@@ -1,3 +1,4 @@
+use core::hash;
 use std::path::PathBuf;
 
 use chrono::DateTime;
@@ -5,6 +6,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use rusqlite::ToSql;
 use serde::Serialize;
+use tokio::sync::Mutex;
 
 struct Migration {
     id: u32,
@@ -49,13 +51,13 @@ const MIGRATIONS: &[Migration] = &[
 	}
 ];
 
-#[derive(Debug, Default)]
-struct FileEntry {
-	hash: Vec<u8>,
-	size: i64,
-	mime_type: String,
-	first_datetime: String,
-	latest_datetime: String
+#[derive(Debug, Default, Serialize)]
+pub struct FileEntry {
+	pub hash: Vec<u8>,
+	pub size: i64,
+	pub mime_type: Option<String>,
+	pub first_datetime: String,
+	pub latest_datetime: String
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -82,19 +84,37 @@ impl PartialEq for FileLocation {
 	}
 }
 
-struct ListArgs {
+#[derive(Debug, Default, Serialize)]
+pub struct ListArgs {
 	search_word: Option<String>,
 }
 
-pub async fn list_files(conn: &Connection, search_word: Option<String>) -> anyhow::Result<Vec<FileEntry>> {
-	let mut stmt = conn.prepare("SELECT * FROM file_entries WHERE name LIKE ?")?;
-	let rows = stmt.query_map(&[&search_word], |row| {
+pub struct DB {
+	conn: Mutex<Connection>
+}
+
+pub fn list_files(conn: &Connection, args: ListArgs) -> anyhow::Result<Vec<FileEntry>> {
+	// Build SQL and params based on whether we have a search term
+	let mut sql = String::from(
+		"SELECT hash, size, mime_type, first_datetime, latest_datetime \
+		 FROM file_entries"
+	);
+	let mut params: Vec<&dyn ToSql> = Vec::new();
+
+	// if let Some(ref term) = args.search_word.filter(|s| !s.is_empty()) {
+	// 	sql.push_str(" WHERE mime_type LIKE ?1");
+	// 	let pattern = format!("%{}%", term);
+	// 	params.push(&pattern);
+	// }
+
+	let mut stmt = conn.prepare(&sql)?;
+	let rows = stmt.query_map(&params[..], |row| {
 		Ok(FileEntry {
 			hash: row.get(0)?,
 			size: row.get(1)?,
 			mime_type: row.get(2)?,
 			first_datetime: row.get(3)?,
-			latest_datetime: row.get(4)?
+			latest_datetime: row.get(4)?,
 		})
 	})?;
 
@@ -102,7 +122,6 @@ pub async fn list_files(conn: &Connection, search_word: Option<String>) -> anyho
 	for file in rows {
 		files.push(file?);
 	}
-
 	Ok(files)
 }
 
@@ -118,6 +137,64 @@ pub async fn get_mime_types(conn: &Connection) -> anyhow::Result<Vec<String>> {
 
 	Ok(mime_types)
 }
+
+pub fn get_file_entry(conn: &Connection, hash: &[u8]) -> anyhow::Result<Option<FileEntry>> {
+    match conn.query_row(
+        "SELECT hash, size, mime_type, first_datetime, latest_datetime FROM file_entries WHERE hash = ?1",
+        [hash],
+        |row| {
+            Ok(FileEntry {
+                hash: row.get(0)?,
+                size: row.get(1)?,
+                mime_type: row.get(2)?,
+                first_datetime: row.get(3)?,
+                latest_datetime: row.get(4)?,
+            })
+        },
+    ) {
+        Ok(entry) => Ok(Some(entry)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn get_file_location(
+	conn: &Connection,
+	node_id: &[u8],
+	hash: &[u8],
+) -> anyhow::Result<Option<FileLocation>> {
+	let mut stmt = conn.prepare(
+		"SELECT path, hash, size, timestamp, created_at, modified_at, accessed_at \
+		 FROM file_locations \
+		 WHERE node_id = ? AND hash = ?",
+	)?;
+	let mut rows = stmt.query_map(&[node_id, hash], |row| {
+		// get an optional Vec<u8> for the hash
+		let hash_opt: Option<Vec<u8>> = row.get(1)?;
+		// convert Vec<u8> into [u8; 32] if present
+		let hash = hash_opt
+			.as_ref()
+			.map(|v| v.as_slice().try_into().expect("hash must be 32 bytes"));
+		Ok(FileLocation {
+			path: PathBuf::from(row.get::<_, String>(0)?),
+			hash,
+			size: row.get::<_, i64>(2)? as u64,
+			// file_locations does not store mime_type, set to None
+			mime_type: None,
+			timestamp: row.get(3)?,
+			created_at: row.get(4)?,
+			modified_at: row.get(5)?,
+			accessed_at: row.get(6)?,
+		})
+	})?;
+
+	// return the first matching row if any
+	if let Some(res) = rows.next() {
+		Ok(Some(res?))
+	} else {
+		Ok(None)
+	}
+}
+
 
 /// Runs embedded database migrations.
 ///

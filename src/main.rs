@@ -1,16 +1,28 @@
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::Path;
 use axum::extract::State;
+use axum::http::header;
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use clap::Parser;
+use db::get_file_entry;
+use db::get_file_location;
+use db::list_files;
 use db::open_db;
 use db::run_migrations;
+use db::ListArgs;
+use http_body_util::StreamBody;
 use rusqlite::Connection;
 use serde_json::json;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use axum::response::{IntoResponse, Response};
+use tokio_util::io::ReaderStream;
 
 mod args;
 mod types;
@@ -57,10 +69,38 @@ async fn main() {
 
 	let app = Router::new()
 		.route("/api/v1/mime_types", get(get_mime_types)).with_state(ctx.clone())
-		.route("/api/v1/files", get(search_files)).with_state(ctx.clone());
+		.route("/api/v1/files", get(search_files)).with_state(ctx.clone())
+		.route("/api/v1/file/{hash}/data", get(get_file_data)).with_state(ctx.clone());
 
 	let listener = tokio::net::TcpListener::bind("0.0.0.0:5225").await.unwrap();
+	log::info!("Listening on {}", listener.local_addr().unwrap());
 	axum::serve(listener, app).await.unwrap();
+}
+
+async fn get_file_data(State(ctx): State<Arc<Context>>, Path(hash): Path<String>) -> impl IntoResponse {
+    let db = ctx.db.lock().await;
+    let hash_bytes = URL_SAFE.decode(hash.as_bytes()).unwrap();
+
+    // Retrieve file entry and location
+    let file_entry = get_file_entry(&db, &hash_bytes).unwrap().unwrap();
+    let file_location = get_file_location(&db, &123456u128.to_le_bytes(), &hash_bytes).unwrap().unwrap();
+    let path = file_location.path;
+
+    // Stream the file if it exists
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => {
+            let content_type = file_entry.mime_type.unwrap_or("".to_string());
+            let stream = ReaderStream::new(file);
+            // let body = StreamBody::new(stream);
+			let body = Body::from_stream(stream);
+            Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .body(body)
+                .unwrap()
+                .into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "File not found").into_response(),
+    }
 }
 
 async fn get_mime_types(State(ctx): State<Arc<Context>>) -> Json<Value> {
@@ -76,6 +116,19 @@ async fn get_mime_types(State(ctx): State<Arc<Context>>) -> Json<Value> {
 }
 
 async fn search_files(State(ctx): State<Arc<Context>>) -> Json<Value> {
-	let _db = ctx.db.lock().await;
-	Json(json!([]))
+	let conn = ctx.db.lock().await;
+	let files = db::list_files(&conn, ListArgs::default()).unwrap(); 
+	let res = files.iter().map(|file| {
+		let hash = URL_SAFE.encode(&file.hash);
+		let size = file.size;
+		let mime_type = file.mime_type.clone();
+		json!({
+			"hash": hash,
+			"size": size,
+			"mime_type": mime_type,
+			"first_datetime": file.first_datetime,
+			"latest_datetime": file.latest_datetime,
+		})
+	}).collect::<Vec<_>>();
+	Json(json!(res))
 }

@@ -30,6 +30,7 @@ mod protocol;
 mod timer;
 mod scan;
 mod db;
+mod pftp;
 
 pub struct Context {
 	pub db: Mutex<Connection>

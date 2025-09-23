@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use serde::{Deserialize, Serialize};
 
 pub const INTRODUCE_CMD: u16 = 1;
 pub const WRITE_FILE_CMD: u16 = 2;
@@ -8,14 +9,14 @@ pub const CREATE_FOLDER_CMD: u16 = 5;
 pub const RENAME_FOLDER_CMD: u16 = 6;
 pub const LIST_FOLDER_CONTENTS_CMD: u16 = 7;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Introduce {
 	pub id: String,
 	pub name: String,
 	pub owner: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerCmd {
     ReadFile {
         node_id: String,

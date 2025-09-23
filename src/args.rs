@@ -1,5 +1,4 @@
 use clap::Parser;
-use clap::Subcommand;
 
 
 #[derive(Debug, Parser)]
@@ -17,6 +16,5 @@ pub struct Args {
 
 #[derive(Debug, Parser)]
 pub enum Command {
-	Copy { src: String, dest: String },
-	Scan { path: String }
+
 }

@@ -8,8 +8,12 @@ const port = Number(Bun.env.PORT ?? 3334);
 type StoredFile = {
 	name: string;
 	size: number;
+	type: string;
 	updatedAt: string;
 	url: string;
+	viewUrl: string;
+	downloadUrl: string;
+	inlineUrl: string;
 };
 
 const ensureDataDir = () => mkdir(dataDir, { recursive: true });
@@ -39,6 +43,27 @@ const uniqueFilePath = async (fileName: string) => {
 	};
 };
 
+const decodeRouteFileName = (name: string) => {
+	try {
+		return decodeURIComponent(name);
+	} catch {
+		return name;
+	}
+};
+
+const getStoredFileName = (name: string) => {
+	const decodedName = decodeRouteFileName(name);
+	const safeName = sanitizeFileName(decodedName);
+	if (safeName !== decodedName || safeName === "." || safeName === "..") {
+		return null;
+	}
+
+	return safeName;
+};
+
+const contentDisposition = (disposition: "attachment" | "inline", name: string) =>
+	`${disposition}; filename="${name.replaceAll('"', "_")}"`;
+
 const json = (body: unknown, init?: ResponseInit) =>
 	Response.json(body, {
 		...init,
@@ -62,8 +87,12 @@ const listFiles = async (): Promise<StoredFile[]> => {
 			return {
 				name,
 				size: fileStat.size,
+				type: Bun.file(filePath).type || "application/octet-stream",
 				updatedAt: fileStat.mtime.toISOString(),
 				url: `/files/${encodeURIComponent(name)}`,
+				viewUrl: `/view/${encodeURIComponent(name)}`,
+				downloadUrl: `/files/${encodeURIComponent(name)}`,
+				inlineUrl: `/inline/${encodeURIComponent(name)}`,
 			};
 		}),
 	);
@@ -92,27 +121,42 @@ const handleUpload = async (request: Request) => {
 		saved.push({
 			name: target.name,
 			size: upload.size,
+			type: upload.type || "application/octet-stream",
 			url: `/files/${encodeURIComponent(target.name)}`,
+			viewUrl: `/view/${encodeURIComponent(target.name)}`,
+			downloadUrl: `/files/${encodeURIComponent(target.name)}`,
+			inlineUrl: `/inline/${encodeURIComponent(target.name)}`,
 		});
 	}
 
 	return json({ files: saved }, { status: 201 });
 };
 
-const serveStoredFile = async (name: string) => {
-	const safeName = sanitizeFileName(name);
-	if (safeName !== name || safeName === "." || safeName === "..") {
+const serveStoredFile = async (
+	name: string,
+	disposition: "attachment" | "inline" = "attachment",
+) => {
+	const safeName = getStoredFileName(name);
+	if (!safeName) {
 		return new Response("Not found", { status: 404 });
 	}
 
-	const file = Bun.file(join(dataDir, safeName));
-	if (!(await file.exists())) {
+	const filePath = join(dataDir, safeName);
+	const file = Bun.file(filePath);
+	try {
+		const fileStat = await stat(filePath);
+		if (!fileStat.isFile()) {
+			return new Response("Not found", { status: 404 });
+		}
+	} catch {
 		return new Response("Not found", { status: 404 });
 	}
 
 	return new Response(file, {
 		headers: {
-			"Content-Disposition": `attachment; filename="${safeName.replaceAll('"', "_")}"`,
+			"Content-Disposition": contentDisposition(disposition, safeName),
+			"Content-Type": file.type || "application/octet-stream",
+			"X-Content-Type-Options": "nosniff",
 		},
 	});
 };
@@ -127,6 +171,8 @@ const server = Bun.serve({
 		},
 		"/api/*": () => json({ error: "Not found" }, { status: 404 }),
 		"/files/:name": (request) => serveStoredFile(request.params.name),
+		"/inline/:name": (request) =>
+			serveStoredFile(request.params.name, "inline"),
 		"/*": index,
 	},
 	development: {

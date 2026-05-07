@@ -49,7 +49,8 @@ button:disabled {
 }
 
 .upload-panel,
-.files-panel {
+.files-panel,
+.viewer-panel {
 	background: #fff;
 	border: 1px solid #d7e0de;
 	border-radius: 8px;
@@ -122,7 +123,14 @@ h2 {
 	align-items: center;
 	display: grid;
 	gap: 16px;
-	grid-template-columns: 1fr auto auto;
+}
+
+.section-header {
+	grid-template-columns: 1fr auto;
+}
+
+.file-row {
+	grid-template-columns: minmax(0, 1fr) auto auto auto;
 }
 
 .section-header {
@@ -170,6 +178,100 @@ h2 {
 	text-decoration: underline;
 }
 
+.file-action,
+.back-link {
+	color: #126e82;
+	font-size: 0.9rem;
+	font-weight: 800;
+	text-decoration: none;
+	white-space: nowrap;
+}
+
+.file-action:hover,
+.back-link:hover {
+	text-decoration: underline;
+}
+
+.viewer-panel {
+	display: grid;
+	gap: 18px;
+}
+
+.viewer-header {
+	align-items: center;
+	display: flex;
+	justify-content: space-between;
+	gap: 16px;
+}
+
+.file-title {
+	display: grid;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.file-title h1 {
+	font-size: clamp(1.5rem, 4vw, 2.4rem);
+	overflow-wrap: anywhere;
+}
+
+.file-title p {
+	color: #5d6f6a;
+	margin: 0;
+}
+
+.preview-surface {
+	align-items: center;
+	background: #f8fbfa;
+	border: 1px solid #e1e7e6;
+	border-radius: 8px;
+	display: grid;
+	min-height: 360px;
+	overflow: hidden;
+}
+
+.media-preview {
+	display: block;
+	height: auto;
+	justify-self: center;
+	max-height: 72vh;
+	max-width: 100%;
+	object-fit: contain;
+	width: auto;
+}
+
+video.media-preview {
+	width: 100%;
+}
+
+.audio-preview {
+	margin: 24px;
+	width: min(620px, calc(100% - 48px));
+}
+
+.document-preview {
+	border: 0;
+	height: min(78vh, 820px);
+	min-height: 520px;
+	width: 100%;
+}
+
+.text-preview {
+	align-self: stretch;
+	color: #1f2933;
+	font:
+		0.9rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+		"Liberation Mono", "Courier New", monospace;
+	margin: 0;
+	overflow: auto;
+	padding: 18px;
+	white-space: pre-wrap;
+}
+
+.preview-message {
+	margin: 24px;
+}
+
 .empty-state {
 	align-items: start;
 	border: 1px dashed #bdcbc8;
@@ -200,6 +302,11 @@ h2 {
 		grid-template-columns: 1fr;
 	}
 
+	.viewer-header {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+
 	.drop-zone {
 		align-items: stretch;
 		display: grid;
@@ -212,5 +319,13 @@ h2 {
 
 	.file-row {
 		gap: 5px;
+	}
+
+	.preview-surface {
+		min-height: 260px;
+	}
+
+	.document-preview {
+		min-height: 420px;
 	}
 }

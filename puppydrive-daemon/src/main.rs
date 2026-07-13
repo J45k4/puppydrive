@@ -1,7 +1,6 @@
-use crate::app::App;
 use log::Level;
 
-mod app;
+use puppydrive_daemon::App;
 
 #[tokio::main]
 async fn main() {

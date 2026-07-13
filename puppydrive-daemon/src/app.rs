@@ -2,9 +2,13 @@ use std::collections::HashSet;
 use std::env;
 use std::net::SocketAddr;
 
-use wgui::{ClientEvent, Item, Wgui, button, hstack, text, text_input, vstack};
+use wgui::{ClientEvent, HttpResponse, Item, Wgui, button, hstack, text, text_input, vstack};
 
 const SEARCH_INPUT_ID: u32 = 10;
+const FAVICON_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../desktop/icons/icon.png"
+));
 
 pub struct App {
     wgui: Wgui,
@@ -18,8 +22,15 @@ impl App {
             panic!("invalid BIND_ADDR '{bind_addr}': {error}");
         });
 
+        let wgui = Wgui::new(bind_addr);
+        wgui.set_http_handler(|request| async move {
+            (request.path == "/favicon.ico").then(|| {
+                HttpResponse::new(200, FAVICON_BYTES.to_vec()).header("content-type", "image/png")
+            })
+        });
+
         Self {
-            wgui: Wgui::new(bind_addr),
+            wgui,
             client_ids: HashSet::new(),
         }
     }

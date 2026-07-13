@@ -2490,6 +2490,8 @@ name = "puppydrive-daemon"
 version = "0.1.0"
 dependencies = [
  "log",
+ "percent-encoding",
+ "serde_json",
  "simple_logger",
  "tokio",
  "wgui",

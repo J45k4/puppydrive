@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
@@ -8,7 +9,7 @@ use std::time::SystemTime;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use wgui::{
     ClientEvent, HttpResponse, Item, Wgui, button, custom_component, hstack, modal, text,
-    text_input, vstack,
+    text_input, textarea, vstack,
 };
 
 const SEARCH_INPUT_ID: u32 = 10;
@@ -19,6 +20,25 @@ const LOCAL_TREE_TOGGLE_ID: u32 = 24;
 const LOCAL_TREE_SELECT_ID: u32 = 25;
 const LOCAL_VIDEO_VIEW_ID: u32 = 26;
 const CLOSE_VIDEO_VIEWER_ID: u32 = 27;
+const LOCAL_TEXT_VIEW_ID: u32 = 28;
+const CLOSE_TEXT_VIEWER_ID: u32 = 29;
+const SAVE_TEXT_VIEWER_ID: u32 = 30;
+const TEXT_VIEW_MODE_ID: u32 = 31;
+const HEX_VIEW_MODE_ID: u32 = 32;
+const TEXT_EDITOR_ID: u32 = 33;
+const FOLDER_ROW_COMPONENT_ID: u32 = 34;
+const FOLDER_CONTEXT_ID: u32 = 35;
+const CLOSE_FOLDER_CONTEXT_ID: u32 = 36;
+const OPEN_FOLDER_CONTEXT_ID: u32 = 37;
+const TOGGLE_FOLDER_CONTEXT_ID: u32 = 38;
+const LOCAL_TREE_NAVIGATE_ID: u32 = 39;
+const SHOW_ADD_SOURCE_ID: u32 = 40;
+const CLOSE_ADD_SOURCE_ID: u32 = 41;
+const SAVE_ADD_SOURCE_ID: u32 = 42;
+const ADD_SOURCE_NAME_INPUT_ID: u32 = 43;
+const ADD_SOURCE_PATH_INPUT_ID: u32 = 44;
+const MAX_FILE_PREVIEW_BYTES: u64 = 1_048_576;
+const MAX_HEX_PREVIEW_BYTES: usize = 65_536;
 const APP_CSS: &str = r#"
 html,
 body {
@@ -34,6 +54,7 @@ body > div {
     overflow: hidden;
 }
 "#;
+const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FAVICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../desktop/icons/icon.png"
@@ -44,8 +65,15 @@ pub struct App {
     client_ids: HashSet<usize>,
     this_computer_root: PathBuf,
     this_computer_path: PathBuf,
+    tree_view_root: PathBuf,
     expanded_local_dirs: HashSet<PathBuf>,
     selected_video: Option<VideoFile>,
+    selected_file: Option<FileViewer>,
+    folder_context: Option<FolderContext>,
+    show_add_source: bool,
+    new_source_name: String,
+    new_source_path: String,
+    additional_sources: Vec<AddedSource>,
     viewing_this_computer: bool,
 }
 
@@ -56,7 +84,14 @@ struct LocalEntry {
     is_symlink: bool,
     kind: &'static str,
     size: String,
+    size_bytes: u64,
     modified: String,
+}
+
+impl LocalEntry {
+    fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
 }
 
 struct TreeNode {
@@ -69,6 +104,31 @@ struct VideoFile {
     size: String,
     modified: String,
     source_url: String,
+}
+
+enum FileViewMode {
+    Text,
+    Hex,
+}
+
+struct FileViewer {
+    path: PathBuf,
+    name: String,
+    size: String,
+    bytes: Vec<u8>,
+    text: Option<String>,
+    mode: FileViewMode,
+    truncated: bool,
+}
+
+struct FolderContext {
+    name: String,
+    path: PathBuf,
+}
+
+struct AddedSource {
+    name: String,
+    path: String,
 }
 
 impl App {
@@ -97,6 +157,10 @@ impl App {
             "/video-viewer.js",
             concat!(env!("CARGO_MANIFEST_DIR"), "/ui/video-viewer.js"),
         );
+        wgui.mount_static_file(
+            "/folder-row.js",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/ui/folder-row.js"),
+        );
         let video_root = this_computer_root.clone();
         wgui.set_http_handler(move |request| {
             let video_root = video_root.clone();
@@ -122,15 +186,23 @@ impl App {
             wgui,
             client_ids: HashSet::new(),
             this_computer_path: this_computer_root.clone(),
+            tree_view_root: this_computer_root.clone(),
             this_computer_root,
             expanded_local_dirs,
             selected_video: None,
+            selected_file: None,
+            folder_context: None,
+            show_add_source: false,
+            new_source_name: String::new(),
+            new_source_path: String::new(),
+            additional_sources: Vec::new(),
             viewing_this_computer: false,
         }
     }
 
     fn render(&self) -> Item {
-        let sidebar = vstack([
+        let version = format!("v{BUILD_VERSION}");
+        let mut sidebar_items = vec![
             text("◕  PuppyDrive").color("#0f6175").padding(6),
             nav_item("▦  Overview", 1, false),
             nav_item("□  Files", 2, true),
@@ -141,26 +213,40 @@ impl App {
             nav_item("◇  Nodes", 7, false),
             nav_item("⇩  Imports", 8, false),
             nav_item("⚙  Settings", 9, false),
-            text("Sources").padding_top(6).color("#6b7280"),
+            hstack([
+                text("Sources").grow(1).color("#6b7280"),
+                button("+")
+                    .id(SHOW_ADD_SOURCE_ID)
+                    .width(28)
+                    .padding(2)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff")
+                    .color("#0f6175"),
+            ])
+            .padding_top(6),
             this_computer_nav_item(self.viewing_this_computer),
             source_nav_item("▦", "Home NAS", !self.viewing_this_computer, true),
             source_nav_item("☁", "PuppyCloud", false, true),
             source_nav_item("▰", "Laptop", false, true),
             source_nav_item("▤", "Camera SD Card", false, false),
-            vstack([
-                text("●  All systems healthy").color("#16803a"),
-                text("PuppyDrive daemon").color("#6b7280"),
-                text("v1.4.2").color("#6b7280"),
-            ])
-            .spacing(3)
+        ];
+        sidebar_items.extend(self.additional_sources.iter().map(|source| {
+            let label = if source.path.is_empty() {
+                source.name.clone()
+            } else {
+                format!("{}  •", source.name)
+            };
+            source_nav_item("□", &label, false, true)
+        }));
+        sidebar_items.extend([
+            vstack(Vec::<Item>::new()).grow(1),
+            text(&version).padding(8).color("#6b7280"),
+        ]);
+        let sidebar = vstack(sidebar_items)
+            .width(210)
+            .spacing(4)
             .padding(8)
-            .border("1px solid #dfe8eb")
-            .background_color("#ffffff"),
-        ])
-        .width(210)
-        .spacing(4)
-        .padding(8)
-        .background_color("#f8fbfc");
+            .background_color("#f8fbfc");
 
         let header = hstack([
             hstack([
@@ -207,9 +293,9 @@ impl App {
         .padding_left(6)
         .padding_right(6);
 
-        let content = hstack([self.files_panel().grow(1), self.details_panel()])
+        let content = self
+            .files_panel()
             .grow(1)
-            .spacing(6)
             .padding_left(6)
             .padding_right(6)
             .overflow("hidden");
@@ -251,6 +337,15 @@ impl App {
         if let Some(viewer) = self.video_viewer_modal() {
             shell.push(viewer);
         }
+        if let Some(viewer) = self.file_viewer_modal() {
+            shell.push(viewer);
+        }
+        if let Some(context_menu) = self.folder_context_modal() {
+            shell.push(context_menu);
+        }
+        if self.show_add_source {
+            shell.push(self.add_source_modal());
+        }
 
         hstack(shell).fill(true).overflow("hidden")
     }
@@ -271,10 +366,42 @@ impl App {
                 ClientEvent::OnTextChanged(change) if change.id == SEARCH_INPUT_ID => {
                     log::debug!("search query changed: {:?}", change.value);
                 }
+                ClientEvent::OnTextChanged(change) if change.id == TEXT_EDITOR_ID => {
+                    if let Some(viewer) = &mut self.selected_file {
+                        viewer.text = Some(change.value);
+                    }
+                }
+                ClientEvent::OnTextChanged(change) if change.id == ADD_SOURCE_NAME_INPUT_ID => {
+                    self.new_source_name = change.value;
+                }
+                ClientEvent::OnTextChanged(change) if change.id == ADD_SOURCE_PATH_INPUT_ID => {
+                    self.new_source_path = change.value;
+                }
+                ClientEvent::OnCustom(event) if event.id == LOCAL_TREE_SELECT_ID => {
+                    if let Some(index) = custom_event_index(&event.payload) {
+                        self.select_tree_directory(index);
+                    }
+                }
+                ClientEvent::OnCustom(event) if event.id == LOCAL_TREE_TOGGLE_ID => {
+                    if let Some(index) = custom_event_index(&event.payload) {
+                        self.toggle_tree_directory(index);
+                    }
+                }
+                ClientEvent::OnCustom(event) if event.id == LOCAL_TREE_NAVIGATE_ID => {
+                    if let Some(index) = custom_event_index(&event.payload) {
+                        self.navigate_to_tree_directory(index);
+                    }
+                }
+                ClientEvent::OnCustom(event) if event.id == FOLDER_CONTEXT_ID => {
+                    if let Some(index) = custom_event_index(&event.payload) {
+                        self.open_folder_context(index);
+                    }
+                }
                 ClientEvent::OnClick(click) => match click.id {
                     THIS_COMPUTER_SOURCE_ID => {
                         self.viewing_this_computer = true;
                         self.this_computer_path = self.this_computer_root.clone();
+                        self.tree_view_root = self.this_computer_root.clone();
                     }
                     LOCAL_PARENT_ID if self.viewing_this_computer => self.go_to_parent(),
                     LOCAL_BREADCRUMB_ID if self.viewing_this_computer => {
@@ -298,6 +425,21 @@ impl App {
                         }
                     }
                     CLOSE_VIDEO_VIEWER_ID => self.selected_video = None,
+                    LOCAL_TEXT_VIEW_ID if self.viewing_this_computer => {
+                        if let Some(index) = click.inx {
+                            self.open_text_file(index as usize);
+                        }
+                    }
+                    CLOSE_TEXT_VIEWER_ID => self.selected_file = None,
+                    TEXT_VIEW_MODE_ID => self.set_file_view_mode(FileViewMode::Text),
+                    HEX_VIEW_MODE_ID => self.set_file_view_mode(FileViewMode::Hex),
+                    SAVE_TEXT_VIEWER_ID => self.save_text_file(),
+                    CLOSE_FOLDER_CONTEXT_ID => self.folder_context = None,
+                    OPEN_FOLDER_CONTEXT_ID => self.open_context_folder(),
+                    TOGGLE_FOLDER_CONTEXT_ID => self.toggle_context_folder(),
+                    SHOW_ADD_SOURCE_ID => self.show_add_source = true,
+                    CLOSE_ADD_SOURCE_ID => self.show_add_source = false,
+                    SAVE_ADD_SOURCE_ID => self.save_added_source(),
                     _ => {}
                 },
                 event => {
@@ -337,6 +479,10 @@ impl App {
                     .as_ref()
                     .filter(|metadata| metadata.is_file())
                     .map_or_else(|| "—".to_owned(), |metadata| format_size(metadata.len()));
+                let size_bytes = metadata
+                    .as_ref()
+                    .filter(|metadata| metadata.is_file())
+                    .map_or(0, fs::Metadata::len);
                 let modified = metadata
                     .and_then(|metadata| metadata.modified().ok())
                     .map_or_else(|| "—".to_owned(), format_modified);
@@ -348,6 +494,7 @@ impl App {
                     is_symlink,
                     kind,
                     size,
+                    size_bytes,
                     modified,
                 }
             })
@@ -368,6 +515,8 @@ impl App {
         }
         if let Some(parent) = self.this_computer_path.parent() {
             self.this_computer_path = parent.to_path_buf();
+            self.tree_view_root = self.this_computer_path.clone();
+            self.expanded_local_dirs.insert(self.tree_view_root.clone());
         }
     }
 
@@ -385,7 +534,9 @@ impl App {
             return;
         };
         if destination.starts_with(&self.this_computer_root) {
-            self.this_computer_path = destination;
+            self.this_computer_path = destination.clone();
+            self.tree_view_root = destination;
+            self.expanded_local_dirs.insert(self.tree_view_root.clone());
         }
     }
 
@@ -397,12 +548,13 @@ impl App {
 
     fn tree_root(&self) -> LocalEntry {
         LocalEntry {
-            path: self.this_computer_root.clone(),
-            name: self.this_computer_root.display().to_string(),
+            path: self.tree_view_root.clone(),
+            name: self.tree_view_root.display().to_string(),
             is_directory: true,
             is_symlink: false,
             kind: "Folder",
             size: "—".to_owned(),
+            size_bytes: 0,
             modified: "—".to_owned(),
         }
     }
@@ -453,6 +605,52 @@ impl App {
         }
     }
 
+    fn navigate_to_tree_directory(&mut self, index: usize) {
+        let nodes = self.tree_nodes();
+        let Some(entry) = nodes.get(index).map(|node| &node.entry) else {
+            return;
+        };
+        if entry.is_directory && !entry.is_symlink {
+            self.this_computer_path = entry.path.clone();
+            self.tree_view_root = entry.path.clone();
+            self.expanded_local_dirs.insert(entry.path.clone());
+        }
+    }
+
+    fn open_folder_context(&mut self, index: usize) {
+        let nodes = self.tree_nodes();
+        let Some(entry) = nodes.get(index).map(|node| &node.entry) else {
+            return;
+        };
+        if entry.is_directory && !entry.is_symlink {
+            self.folder_context = Some(FolderContext {
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+            });
+        }
+    }
+
+    fn open_context_folder(&mut self) {
+        let Some(context) = self.folder_context.as_ref() else {
+            return;
+        };
+        self.this_computer_path = context.path.clone();
+        self.tree_view_root = context.path.clone();
+        self.expanded_local_dirs.insert(self.tree_view_root.clone());
+        self.folder_context = None;
+    }
+
+    fn toggle_context_folder(&mut self) {
+        let Some(context) = self.folder_context.as_ref() else {
+            return;
+        };
+        let path = context.path.clone();
+        if !self.expanded_local_dirs.insert(path.clone()) {
+            self.expanded_local_dirs.remove(&path);
+        }
+        self.folder_context = None;
+    }
+
     fn open_video(&mut self, index: usize) {
         let nodes = self.tree_nodes();
         let Some(entry) = nodes.get(index).map(|node| &node.entry) else {
@@ -468,7 +666,89 @@ impl App {
                 modified: entry.modified.clone(),
                 source_url,
             });
+            self.selected_file = None;
         }
+    }
+
+    fn open_text_file(&mut self, index: usize) {
+        let nodes = self.tree_nodes();
+        let Some(entry) = nodes.get(index).map(|node| &node.entry) else {
+            return;
+        };
+        if entry.is_directory || entry.is_symlink {
+            return;
+        }
+
+        let Ok(path) = fs::canonicalize(&entry.path) else {
+            return;
+        };
+        if !path.starts_with(&self.this_computer_root) {
+            return;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_FILE_PREVIEW_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return;
+        }
+        let truncated = entry.size_bytes() > MAX_FILE_PREVIEW_BYTES;
+        let text = String::from_utf8(bytes.clone()).ok();
+        let mode = if text.is_some() {
+            FileViewMode::Text
+        } else {
+            FileViewMode::Hex
+        };
+
+        self.selected_file = Some(FileViewer {
+            path,
+            name: entry.name.clone(),
+            size: entry.size.clone(),
+            bytes,
+            text,
+            mode,
+            truncated,
+        });
+        self.selected_video = None;
+    }
+
+    fn set_file_view_mode(&mut self, mode: FileViewMode) {
+        if let Some(viewer) = &mut self.selected_file {
+            viewer.mode = mode;
+        }
+    }
+
+    fn save_text_file(&mut self) {
+        let Some(viewer) = &mut self.selected_file else {
+            return;
+        };
+        let Some(text) = viewer.text.as_ref() else {
+            return;
+        };
+        if viewer.truncated {
+            return;
+        }
+        if fs::write(&viewer.path, text).is_ok() {
+            viewer.bytes = text.as_bytes().to_vec();
+        }
+    }
+
+    fn save_added_source(&mut self) {
+        let name = self.new_source_name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.additional_sources.push(AddedSource {
+            name: name.to_owned(),
+            path: self.new_source_path.trim().to_owned(),
+        });
+        self.new_source_name.clear();
+        self.new_source_path.clear();
+        self.show_add_source = false;
     }
 }
 
@@ -603,25 +883,6 @@ impl App {
         .overflow("hidden")
     }
 
-    fn details_panel(&self) -> Item {
-        if self.viewing_this_computer {
-            let current_path = self.this_computer_path.display().to_string();
-            return card(vstack([
-                text("This Computer").padding_bottom(10),
-                text("Local filesystem source").color("#4b5563"),
-                text(&current_path).color("#0f6175"),
-                text("Use folders to browse from this source's root.")
-                    .padding_top(8)
-                    .color("#6b7280"),
-            ]))
-            .width(260)
-            .spacing(4)
-            .padding(6);
-        }
-
-        details_panel()
-    }
-
     fn video_viewer_modal(&self) -> Option<Item> {
         let video = self.selected_video.as_ref()?;
 
@@ -665,6 +926,175 @@ impl App {
         .width(820)
         .spacing(6)
         .padding(14)]))
+    }
+
+    fn file_viewer_modal(&self) -> Option<Item> {
+        let file = self.selected_file.as_ref()?;
+        let showing_text = matches!(file.mode, FileViewMode::Text);
+        let text_content = file
+            .text
+            .as_deref()
+            .unwrap_or("This file is not valid UTF-8. Switch to Hex to inspect its bytes.");
+        let hex_content = format_hex(&file.bytes, file.truncated);
+        let editor = if showing_text && file.text.is_some() {
+            textarea()
+                .id(TEXT_EDITOR_ID)
+                .svalue(text_content)
+                .height(480)
+                .padding(12)
+                .background_color("#111827")
+                .color("#d1d5db")
+        } else {
+            let content = if showing_text {
+                text_content.to_owned()
+            } else {
+                hex_content
+            };
+            vstack([text(&content)
+                .white_space("pre-wrap")
+                .break_words(true)
+                .color("#d1d5db")])
+            .height(480)
+            .padding(12)
+            .background_color("#111827")
+            .overflow("auto")
+        };
+
+        Some(modal([card(vstack([
+            hstack([
+                vstack([text("File viewer"), text(&file.name).color("#6b7280")])
+                    .grow(1)
+                    .spacing(2),
+                button("×")
+                    .id(CLOSE_TEXT_VIEWER_ID)
+                    .width(40)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ])
+            .padding_bottom(8),
+            hstack([
+                button("Text")
+                    .id(TEXT_VIEW_MODE_ID)
+                    .padding(5)
+                    .border("1px solid #dce5e8")
+                    .background_color(if showing_text { "#e5f4f7" } else { "#ffffff" })
+                    .color("#0f6175"),
+                button("Hex")
+                    .id(HEX_VIEW_MODE_ID)
+                    .padding(5)
+                    .border("1px solid #dce5e8")
+                    .background_color(if showing_text { "#ffffff" } else { "#e5f4f7" })
+                    .color("#0f6175"),
+                text(if file.truncated {
+                    "Preview limited to the first 1 MiB"
+                } else {
+                    ""
+                })
+                .grow(1)
+                .color("#6b7280"),
+            ])
+            .spacing(6)
+            .padding_bottom(6),
+            editor,
+            hstack([
+                text(&file.size).grow(1).color("#6b7280"),
+                button("Save")
+                    .id(SAVE_TEXT_VIEWER_ID)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+                button("Close")
+                    .id(CLOSE_TEXT_VIEWER_ID)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ])
+            .padding_top(8),
+        ]))
+        .width(820)
+        .spacing(6)
+        .padding(14)]))
+    }
+
+    fn folder_context_modal(&self) -> Option<Item> {
+        let context = self.folder_context.as_ref()?;
+        let is_expanded = self.expanded_local_dirs.contains(&context.path);
+        let path = context.path.display().to_string();
+
+        Some(modal([card(vstack([
+            hstack([
+                text(&context.name).grow(1),
+                button("×")
+                    .id(CLOSE_FOLDER_CONTEXT_ID)
+                    .width(40)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ]),
+            text(&path).color("#6b7280").break_words(true),
+            button("Open folder")
+                .id(OPEN_FOLDER_CONTEXT_ID)
+                .padding(8)
+                .border("1px solid #dce5e8")
+                .background_color("#ffffff")
+                .text_align("left"),
+            button(if is_expanded {
+                "Collapse folder"
+            } else {
+                "Expand folder"
+            })
+            .id(TOGGLE_FOLDER_CONTEXT_ID)
+            .padding(8)
+            .border("1px solid #dce5e8")
+            .background_color("#ffffff")
+            .text_align("left"),
+        ]))
+        .width(360)
+        .spacing(8)
+        .padding(14)]))
+    }
+
+    fn add_source_modal(&self) -> Item {
+        modal([card(vstack([
+            hstack([
+                text("Add source").grow(1),
+                button("×")
+                    .id(CLOSE_ADD_SOURCE_ID)
+                    .width(40)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ]),
+            text("Source name").color("#4b5563"),
+            text_input()
+                .id(ADD_SOURCE_NAME_INPUT_ID)
+                .svalue(&self.new_source_name)
+                .placeholder("e.g. Archive drive"),
+            text("Folder path").color("#4b5563"),
+            text_input()
+                .id(ADD_SOURCE_PATH_INPUT_ID)
+                .svalue(&self.new_source_path)
+                .placeholder("e.g. /Volumes/Archive"),
+            text("The source is added to this session's sidebar.").color("#6b7280"),
+            hstack([
+                button("Cancel")
+                    .id(CLOSE_ADD_SOURCE_ID)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+                button("Add source")
+                    .id(SAVE_ADD_SOURCE_ID)
+                    .padding(6)
+                    .border("1px solid #0f7892")
+                    .background_color("#0f7892")
+                    .color("#ffffff"),
+            ])
+            .spacing(8),
+        ]))
+        .width(440)
+        .spacing(8)
+        .padding(14)])
     }
 }
 
@@ -784,32 +1214,26 @@ fn local_tree_row(node: &TreeNode, index: u32, expanded: bool, selected: bool) -
         if entry.is_directory { "▰" } else { "▤" },
         entry.name
     );
-    let expander = if is_folder {
-        button(if expanded { "⌄" } else { "›" })
-            .id(LOCAL_TREE_TOGGLE_ID)
-            .inx(index)
-            .width(22)
-            .min_width(22)
-            .padding(2)
-            .border("1px solid transparent")
-            .background_color(background)
-            .color("#687385")
-            .cursor("pointer")
-    } else {
-        text("").width(22).min_width(22)
-    };
     let name = if is_folder {
-        button(&name)
-            .id(LOCAL_TREE_SELECT_ID)
-            .inx(index)
-            .grow(1)
-            .min_width(0)
-            .padding(2)
-            .border("1px solid transparent")
-            .background_color(background)
-            .color("#374151")
-            .text_align("left")
-            .cursor("pointer")
+        custom_component(
+            "folder-row",
+            "/folder-row.js?v=4",
+            serde_json::json!({
+                "label": name,
+                "selected": selected,
+                "expanded": expanded,
+                "indent": indent,
+                "index": index,
+            }),
+        )
+        .id(FOLDER_ROW_COMPONENT_ID)
+        .inx(index)
+        .custom_event("open", LOCAL_TREE_SELECT_ID)
+        .custom_event("toggle", LOCAL_TREE_TOGGLE_ID)
+        .custom_event("navigate", LOCAL_TREE_NAVIGATE_ID)
+        .custom_event("context", FOLDER_CONTEXT_ID)
+        .grow(1)
+        .min_width(0)
     } else if is_video_file(entry) {
         button(&name)
             .id(LOCAL_VIDEO_VIEW_ID)
@@ -823,11 +1247,30 @@ fn local_tree_row(node: &TreeNode, index: u32, expanded: bool, selected: bool) -
             .text_align("left")
             .cursor("pointer")
     } else {
-        text(&name).grow(1).min_width(0).padding(2).color("#374151")
+        button(&name)
+            .id(LOCAL_TEXT_VIEW_ID)
+            .inx(index)
+            .grow(1)
+            .min_width(0)
+            .padding(2)
+            .border("1px solid transparent")
+            .background_color(background)
+            .color("#0f6175")
+            .text_align("left")
+            .cursor("pointer")
     };
 
     hstack([
-        hstack([text("").width(indent).min_width(indent), expander, name]).grow(1),
+        if is_folder {
+            name
+        } else {
+            hstack([
+                text("").width(indent).min_width(indent),
+                text("").width(22),
+                name,
+            ])
+            .grow(1)
+        },
         text(entry.kind).width(140),
         text(&entry.size).width(100),
         text(&entry.modified).width(150),
@@ -843,6 +1286,47 @@ fn is_video_file(entry: &LocalEntry) -> bool {
             .path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+}
+
+fn format_hex(bytes: &[u8], truncated: bool) -> String {
+    let shown = &bytes[..bytes.len().min(MAX_HEX_PREVIEW_BYTES)];
+    let mut output = String::new();
+
+    for (offset, chunk) in shown.chunks(16).enumerate() {
+        let address = offset * 16;
+        output.push_str(&format!("{address:08x}  "));
+        for index in 0..16 {
+            if let Some(byte) = chunk.get(index) {
+                output.push_str(&format!("{byte:02x} "));
+            } else {
+                output.push_str("   ");
+            }
+            if index == 7 {
+                output.push(' ');
+            }
+        }
+        output.push(' ');
+        for byte in chunk {
+            output.push(if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            });
+        }
+        output.push('\n');
+    }
+
+    if truncated || bytes.len() > shown.len() {
+        output.push_str("\n… preview truncated …");
+    }
+    output
+}
+
+fn custom_event_index(payload: &serde_json::Value) -> Option<usize> {
+    payload
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
 }
 
 fn video_source_url(root: &Path, path: &Path) -> Option<String> {
@@ -947,33 +1431,6 @@ fn file_row(
     .padding(4)
     .background_color(background)
     .color("#374151")
-}
-
-fn details_panel() -> Item {
-    card(vstack([
-        hstack([text("holiday-video-2025.mp4").grow(1), text("×")]).padding_bottom(10),
-        text("▶  Family beach holiday\n     00:00 / 01:32")
-            .padding(8)
-            .color("#ffffff")
-            .background_color("#1f2937"),
-        text("Type       MP4 Video"),
-        text("Size       3.45 GB").color("#4b5563"),
-        text("Modified   Apr 21, 2025 10:18 AM").color("#4b5563"),
-        text("Resolution 3840 × 2160 (4K)").color("#4b5563"),
-        text("Locations").padding_top(6),
-        text("▦  Home NAS       ●  Complete copy").color("#4b5563"),
-        text("☁  PuppyCloud     ●  Backup copy").color("#4b5563"),
-        text("Actions").padding_top(6),
-        hstack([button("▷  Play").grow(1), button("＋  Add backup").grow(1)]).spacing(8),
-        hstack([
-            button("⇩  Download").grow(1),
-            button("□  Open location").grow(1),
-        ])
-        .spacing(8),
-    ]))
-    .width(260)
-    .spacing(4)
-    .padding(6)
 }
 
 fn transfer_row(icon: &str, title: &str, subtitle: &str, progress: &str) -> Item {

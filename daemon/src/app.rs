@@ -8,8 +8,8 @@ use std::time::SystemTime;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use wgui::{
-    ClientEvent, HttpResponse, Item, Wgui, button, custom_component, hstack, modal, text,
-    text_input, textarea, vstack,
+    ClientEvent, HttpResponse, Item, StaticAsset, Wgui, button, custom_component, hstack, modal,
+    text, text_input, textarea, vstack,
 };
 
 const SEARCH_INPUT_ID: u32 = 10;
@@ -19,9 +19,9 @@ const LOCAL_BREADCRUMB_ID: u32 = 23;
 const LOCAL_TREE_TOGGLE_ID: u32 = 24;
 const LOCAL_TREE_SELECT_ID: u32 = 25;
 const LOCAL_VIDEO_VIEW_ID: u32 = 26;
-const CLOSE_VIDEO_VIEWER_ID: u32 = 27;
+const CLOSE_FILE_VIEWER_ID: u32 = 27;
 const LOCAL_TEXT_VIEW_ID: u32 = 28;
-const CLOSE_TEXT_VIEWER_ID: u32 = 29;
+const TOGGLE_FILE_VIEWER_SIZE_ID: u32 = 29;
 const SAVE_TEXT_VIEWER_ID: u32 = 30;
 const TEXT_VIEW_MODE_ID: u32 = 31;
 const HEX_VIEW_MODE_ID: u32 = 32;
@@ -37,6 +37,7 @@ const CLOSE_ADD_SOURCE_ID: u32 = 41;
 const SAVE_ADD_SOURCE_ID: u32 = 42;
 const ADD_SOURCE_NAME_INPUT_ID: u32 = 43;
 const ADD_SOURCE_PATH_INPUT_ID: u32 = 44;
+const LOCAL_IMAGE_VIEW_ID: u32 = 45;
 const MAX_FILE_PREVIEW_BYTES: u64 = 1_048_576;
 const MAX_HEX_PREVIEW_BYTES: usize = 65_536;
 const APP_CSS: &str = r#"
@@ -67,8 +68,13 @@ pub struct App {
     this_computer_path: PathBuf,
     tree_view_root: PathBuf,
     expanded_local_dirs: HashSet<PathBuf>,
+    video_viewer_asset: StaticAsset,
+    image_viewer_asset: StaticAsset,
+    folder_row_asset: StaticAsset,
     selected_video: Option<VideoFile>,
+    selected_image: Option<ImageFile>,
     selected_file: Option<FileViewer>,
+    file_viewer_expanded: bool,
     folder_context: Option<FolderContext>,
     show_add_source: bool,
     new_source_name: String,
@@ -100,6 +106,13 @@ struct TreeNode {
 }
 
 struct VideoFile {
+    name: String,
+    size: String,
+    modified: String,
+    source_url: String,
+}
+
+struct ImageFile {
     name: String,
     size: String,
     modified: String,
@@ -153,17 +166,21 @@ impl App {
 
         let wgui = Wgui::new(bind_addr);
         wgui.set_css(APP_CSS);
-        wgui.mount_static_file(
+        let video_viewer_asset = wgui.mount_static_file(
             "/video-viewer.js",
             concat!(env!("CARGO_MANIFEST_DIR"), "/ui/video-viewer.js"),
         );
-        wgui.mount_static_file(
+        let image_viewer_asset = wgui.mount_static_file(
+            "/image-viewer.js",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/ui/image-viewer.js"),
+        );
+        let folder_row_asset = wgui.mount_static_file(
             "/folder-row.js",
             concat!(env!("CARGO_MANIFEST_DIR"), "/ui/folder-row.js"),
         );
-        let video_root = this_computer_root.clone();
+        let media_root = this_computer_root.clone();
         wgui.set_http_handler(move |request| {
-            let video_root = video_root.clone();
+            let media_root = media_root.clone();
             async move {
                 if request.path == "/favicon.ico" {
                     return Some(
@@ -174,8 +191,7 @@ impl App {
                 request
                     .path
                     .strip_prefix("/source-files/")
-                    .map(|relative_path| local_video_response(relative_path, &video_root))
-                    .flatten()
+                    .and_then(|relative_path| local_media_response(relative_path, &media_root))
             }
         });
 
@@ -189,8 +205,13 @@ impl App {
             tree_view_root: this_computer_root.clone(),
             this_computer_root,
             expanded_local_dirs,
+            video_viewer_asset,
+            image_viewer_asset,
+            folder_row_asset,
             selected_video: None,
+            selected_image: None,
             selected_file: None,
+            file_viewer_expanded: false,
             folder_context: None,
             show_add_source: false,
             new_source_name: String::new(),
@@ -334,9 +355,6 @@ impl App {
                 .overflow("hidden")
                 .background_color("#f4f7f8"),
         ];
-        if let Some(viewer) = self.video_viewer_modal() {
-            shell.push(viewer);
-        }
         if let Some(viewer) = self.file_viewer_modal() {
             shell.push(viewer);
         }
@@ -424,13 +442,20 @@ impl App {
                             self.open_video(index as usize);
                         }
                     }
-                    CLOSE_VIDEO_VIEWER_ID => self.selected_video = None,
+                    LOCAL_IMAGE_VIEW_ID if self.viewing_this_computer => {
+                        if let Some(index) = click.inx {
+                            self.open_image(index as usize);
+                        }
+                    }
                     LOCAL_TEXT_VIEW_ID if self.viewing_this_computer => {
                         if let Some(index) = click.inx {
                             self.open_text_file(index as usize);
                         }
                     }
-                    CLOSE_TEXT_VIEWER_ID => self.selected_file = None,
+                    CLOSE_FILE_VIEWER_ID => self.close_file_viewer(),
+                    TOGGLE_FILE_VIEWER_SIZE_ID => {
+                        self.file_viewer_expanded = !self.file_viewer_expanded;
+                    }
                     TEXT_VIEW_MODE_ID => self.set_file_view_mode(FileViewMode::Text),
                     HEX_VIEW_MODE_ID => self.set_file_view_mode(FileViewMode::Hex),
                     SAVE_TEXT_VIEWER_ID => self.save_text_file(),
@@ -657,7 +682,7 @@ impl App {
             return;
         };
         if is_video_file(entry) {
-            let Some(source_url) = video_source_url(&self.this_computer_root, &entry.path) else {
+            let Some(source_url) = media_source_url(&self.this_computer_root, &entry.path) else {
                 return;
             };
             self.selected_video = Some(VideoFile {
@@ -666,7 +691,30 @@ impl App {
                 modified: entry.modified.clone(),
                 source_url,
             });
+            self.selected_image = None;
             self.selected_file = None;
+            self.file_viewer_expanded = false;
+        }
+    }
+
+    fn open_image(&mut self, index: usize) {
+        let nodes = self.tree_nodes();
+        let Some(entry) = nodes.get(index).map(|node| &node.entry) else {
+            return;
+        };
+        if is_image_file(entry) {
+            let Some(source_url) = media_source_url(&self.this_computer_root, &entry.path) else {
+                return;
+            };
+            self.selected_image = Some(ImageFile {
+                name: entry.name.clone(),
+                size: entry.size.clone(),
+                modified: entry.modified.clone(),
+                source_url,
+            });
+            self.selected_video = None;
+            self.selected_file = None;
+            self.file_viewer_expanded = false;
         }
     }
 
@@ -714,6 +762,15 @@ impl App {
             truncated,
         });
         self.selected_video = None;
+        self.selected_image = None;
+        self.file_viewer_expanded = false;
+    }
+
+    fn close_file_viewer(&mut self) {
+        self.selected_video = None;
+        self.selected_image = None;
+        self.selected_file = None;
+        self.file_viewer_expanded = false;
     }
 
     fn set_file_view_mode(&mut self, mode: FileViewMode) {
@@ -870,7 +927,13 @@ impl App {
         let rows = nodes.iter().enumerate().map(|(index, node)| {
             let expanded = self.expanded_local_dirs.contains(&node.entry.path);
             let selected = self.this_computer_path == node.entry.path;
-            local_tree_row(node, index as u32, expanded, selected)
+            local_tree_row(
+                node,
+                index as u32,
+                expanded,
+                selected,
+                self.folder_row_asset.url(),
+            )
         });
 
         card(vstack([
@@ -883,53 +946,109 @@ impl App {
         .overflow("hidden")
     }
 
-    fn video_viewer_modal(&self) -> Option<Item> {
-        let video = self.selected_video.as_ref()?;
-
-        Some(modal([card(vstack([
+    fn file_viewer_modal(&self) -> Option<Item> {
+        let (name, content) = if let Some(video) = self.selected_video.as_ref() {
+            (&video.name, self.video_file_viewer_content(video))
+        } else if let Some(image) = self.selected_image.as_ref() {
+            (&image.name, self.image_file_viewer_content(image))
+        } else if let Some(file) = self.selected_file.as_ref() {
+            (&file.name, self.text_file_viewer_content(file))
+        } else {
+            return None;
+        };
+        let expanded = self.file_viewer_expanded;
+        let viewer = card(vstack([
             hstack([
-                vstack([text("Video viewer"), text(&video.name).color("#6b7280")])
+                vstack([text("File viewer"), text(name).color("#6b7280")])
                     .grow(1)
                     .spacing(2),
+                button(if expanded {
+                    "↙  Restore"
+                } else {
+                    "⛶  Maximize"
+                })
+                .id(TOGGLE_FILE_VIEWER_SIZE_ID)
+                .width(112)
+                .padding(6)
+                .border("1px solid #dce5e8")
+                .background_color("#ffffff"),
                 button("×")
-                    .id(CLOSE_VIDEO_VIEWER_ID)
+                    .id(CLOSE_FILE_VIEWER_ID)
                     .width(40)
                     .padding(6)
                     .border("1px solid #dce5e8")
                     .background_color("#ffffff"),
             ])
             .padding_bottom(8),
+            content,
+        ]))
+        .name(if expanded {
+            "file-viewer-modal-expanded"
+        } else {
+            "file-viewer-modal"
+        })
+        .fill(expanded)
+        .width(if expanded { 0 } else { 900 })
+        .max_height(if expanded { 0 } else { 900 })
+        .spacing(6)
+        .padding(14)
+        .overflow("hidden");
+
+        Some(modal([viewer]).padding(if expanded { 1 } else { 32 }))
+    }
+
+    fn video_file_viewer_content(&self, video: &VideoFile) -> Item {
+        vstack([
             custom_component(
                 "video-viewer",
-                "/video-viewer.js",
+                self.video_viewer_asset.url(),
                 serde_json::json!({ "src": video.source_url }),
             )
             .fill(true)
-            .height(380)
+            .grow(1)
+            .height(440)
             .background_color("#111827"),
             hstack([
                 text("MP4 video").grow(1).color("#4b5563"),
-                text(&video.size).width(100).color("#4b5563"),
-                text(&video.modified).width(150).color("#4b5563"),
+                text(&video.size).color("#4b5563"),
+                text(&video.modified).color("#4b5563"),
             ])
+            .spacing(12)
             .padding_top(8),
-            hstack([
-                text("Playing from This Computer").grow(1).color("#6b7280"),
-                button("Close")
-                    .id(CLOSE_VIDEO_VIEWER_ID)
-                    .padding(6)
-                    .border("1px solid #dce5e8")
-                    .background_color("#ffffff"),
-            ])
-            .padding_top(8),
-        ]))
-        .width(820)
-        .spacing(6)
-        .padding(14)]))
+        ])
+        .grow(1)
+        .overflow("hidden")
     }
 
-    fn file_viewer_modal(&self) -> Option<Item> {
-        let file = self.selected_file.as_ref()?;
+    fn image_file_viewer_content(&self, image: &ImageFile) -> Item {
+        vstack([
+            custom_component(
+                "image-viewer",
+                self.image_viewer_asset.url(),
+                serde_json::json!({
+                    "src": image.source_url,
+                    "alt": image.name,
+                }),
+            )
+            .fill(true)
+            .grow(1)
+            .height(520)
+            .background_color("#111827"),
+            hstack([
+                text("Mouse wheel to zoom  •  Left-drag to pan")
+                    .grow(1)
+                    .color("#6b7280"),
+                text(&image.size).color("#6b7280"),
+                text(&image.modified).color("#6b7280"),
+            ])
+            .spacing(12)
+            .padding_top(8),
+        ])
+        .grow(1)
+        .overflow("hidden")
+    }
+
+    fn text_file_viewer_content(&self, file: &FileViewer) -> Item {
         let showing_text = matches!(file.mode, FileViewMode::Text);
         let text_content = file
             .text
@@ -958,21 +1077,10 @@ impl App {
             .padding(12)
             .background_color("#111827")
             .overflow("auto")
-        };
+        }
+        .grow(1);
 
-        Some(modal([card(vstack([
-            hstack([
-                vstack([text("File viewer"), text(&file.name).color("#6b7280")])
-                    .grow(1)
-                    .spacing(2),
-                button("×")
-                    .id(CLOSE_TEXT_VIEWER_ID)
-                    .width(40)
-                    .padding(6)
-                    .border("1px solid #dce5e8")
-                    .background_color("#ffffff"),
-            ])
-            .padding_bottom(8),
+        vstack([
             hstack([
                 button("Text")
                     .id(TEXT_VIEW_MODE_ID)
@@ -1004,17 +1112,11 @@ impl App {
                     .padding(6)
                     .border("1px solid #dce5e8")
                     .background_color("#ffffff"),
-                button("Close")
-                    .id(CLOSE_TEXT_VIEWER_ID)
-                    .padding(6)
-                    .border("1px solid #dce5e8")
-                    .background_color("#ffffff"),
             ])
             .padding_top(8),
-        ]))
-        .width(820)
-        .spacing(6)
-        .padding(14)]))
+        ])
+        .grow(1)
+        .overflow("hidden")
     }
 
     fn folder_context_modal(&self) -> Option<Item> {
@@ -1204,7 +1306,13 @@ fn local_breadcrumbs(parts: &[String]) -> Item {
     hstack(items).spacing(5)
 }
 
-fn local_tree_row(node: &TreeNode, index: u32, expanded: bool, selected: bool) -> Item {
+fn local_tree_row(
+    node: &TreeNode,
+    index: u32,
+    expanded: bool,
+    selected: bool,
+    folder_row_entry: &str,
+) -> Item {
     let background = if selected { "#e5f4f7" } else { "#ffffff" };
     let entry = &node.entry;
     let is_folder = entry.is_directory && !entry.is_symlink;
@@ -1217,7 +1325,7 @@ fn local_tree_row(node: &TreeNode, index: u32, expanded: bool, selected: bool) -
     let name = if is_folder {
         custom_component(
             "folder-row",
-            "/folder-row.js?v=4",
+            folder_row_entry,
             serde_json::json!({
                 "label": name,
                 "selected": selected,
@@ -1237,6 +1345,18 @@ fn local_tree_row(node: &TreeNode, index: u32, expanded: bool, selected: bool) -
     } else if is_video_file(entry) {
         button(&name)
             .id(LOCAL_VIDEO_VIEW_ID)
+            .inx(index)
+            .grow(1)
+            .min_width(0)
+            .padding(2)
+            .border("1px solid transparent")
+            .background_color(background)
+            .color("#0f6175")
+            .text_align("left")
+            .cursor("pointer")
+    } else if is_image_file(entry) {
+        button(&name)
+            .id(LOCAL_IMAGE_VIEW_ID)
             .inx(index)
             .grow(1)
             .min_width(0)
@@ -1288,6 +1408,33 @@ fn is_video_file(entry: &LocalEntry) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
 }
 
+fn is_image_file(entry: &LocalEntry) -> bool {
+    !entry.is_directory && !entry.is_symlink && image_content_type(&entry.path).is_some()
+}
+
+fn image_content_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("png") {
+        Some("image/png")
+    } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
+        Some("image/jpeg")
+    } else if extension.eq_ignore_ascii_case("gif") {
+        Some("image/gif")
+    } else if extension.eq_ignore_ascii_case("webp") {
+        Some("image/webp")
+    } else if extension.eq_ignore_ascii_case("bmp") {
+        Some("image/bmp")
+    } else if extension.eq_ignore_ascii_case("avif") {
+        Some("image/avif")
+    } else if extension.eq_ignore_ascii_case("svg") {
+        Some("image/svg+xml")
+    } else if extension.eq_ignore_ascii_case("ico") {
+        Some("image/x-icon")
+    } else {
+        None
+    }
+}
+
 fn format_hex(bytes: &[u8], truncated: bool) -> String {
     let shown = &bytes[..bytes.len().min(MAX_HEX_PREVIEW_BYTES)];
     let mut output = String::new();
@@ -1329,7 +1476,7 @@ fn custom_event_index(payload: &serde_json::Value) -> Option<usize> {
         .and_then(|index| usize::try_from(index).ok())
 }
 
-fn video_source_url(root: &Path, path: &Path) -> Option<String> {
+fn media_source_url(root: &Path, path: &Path) -> Option<String> {
     let path = fs::canonicalize(path).ok()?;
     let relative_path = path.strip_prefix(root).ok()?;
     let segments = relative_path
@@ -1351,33 +1498,39 @@ fn video_source_url(root: &Path, path: &Path) -> Option<String> {
     })
 }
 
-fn local_video_response(relative_path: &str, root: &Path) -> Option<HttpResponse> {
+fn local_media_response(relative_path: &str, root: &Path) -> Option<HttpResponse> {
     let relative_path = percent_decode_str(relative_path).decode_utf8().ok()?;
     let mut path = root.to_path_buf();
     for component in Path::new(relative_path.as_ref()).components() {
         let Component::Normal(segment) = component else {
-            return Some(HttpResponse::new(400, "invalid video path"));
+            return Some(HttpResponse::new(400, "invalid media path"));
         };
         path.push(segment);
     }
 
     let Ok(path) = fs::canonicalize(path) else {
-        return Some(HttpResponse::new(404, "video not found"));
+        return Some(HttpResponse::new(404, "media not found"));
     };
-    if !path.starts_with(root)
-        || !path.is_file()
-        || !path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
-    {
-        return Some(HttpResponse::new(404, "video not found"));
+    if !path.starts_with(root) || !path.is_file() {
+        return Some(HttpResponse::new(404, "media not found"));
     }
+
+    let content_type = if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+    {
+        "video/mp4"
+    } else if let Some(content_type) = image_content_type(&path) {
+        content_type
+    } else {
+        return Some(HttpResponse::new(404, "media not found"));
+    };
 
     Some(match fs::read(path) {
         Ok(bytes) => HttpResponse::new(200, bytes)
-            .header("content-type", "video/mp4")
+            .header("content-type", content_type)
             .header("accept-ranges", "bytes"),
-        Err(_) => HttpResponse::new(403, "video cannot be read"),
+        Err(_) => HttpResponse::new(403, "media cannot be read"),
     })
 }
 

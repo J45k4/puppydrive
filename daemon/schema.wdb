@@ -1,0 +1,16 @@
+model ScannedFolder {
+  id: Int @id
+  path: String
+  enabled: Bool
+  indexers: Json
+}
+
+model Source {
+  id: Int @id
+  source_key: UUID
+  name: String
+  source_type: String
+  config_schema_version: Int
+  config: Json
+  enabled: Bool
+}

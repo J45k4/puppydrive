@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1"
+blake3 = "1"
+directories = "6"
 log = "0.4"
+notify = "8"
 percent-encoding = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 simple_logger = "5"
 tokio = { version = "1", features = ["full"] }
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "ba2303ff40b37e5f035cff74693d591fc0d1e176" }
+uuid = { version = "1", features = ["v4"] }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "ba2303ff40b37e5f035cff74693d591fc0d1e176", features = ["sqlite"] }

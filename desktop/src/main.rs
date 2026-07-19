@@ -2,29 +2,37 @@ use log::Level;
 use puppydrive_daemon::App as DaemonApp;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:5777";
-
 fn main() {
     simple_logger::init_with_level(Level::Info).expect("failed to initialize logger");
 
     tauri::Builder::default()
         .setup(|app| {
+            let (address_sender, address_receiver) = std::sync::mpsc::sync_channel(1);
             std::thread::Builder::new()
                 .name("puppydrive-daemon".into())
-                .spawn(|| {
+                .spawn(move || {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("failed to create daemon runtime");
 
                     runtime.block_on(async {
-                        let mut daemon = DaemonApp::new();
-                        daemon.run().await;
+                        match DaemonApp::new() {
+                            Ok(mut daemon) => {
+                                let _ = address_sender.send(Ok(daemon.bind_address()));
+                                daemon.run().await;
+                            }
+                            Err(error) => {
+                                let _ = address_sender.send(Err(format!("{error:#}")));
+                            }
+                        }
                     });
                 })?;
 
-            let daemon_addr =
-                std::env::var("BIND_ADDR").unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.into());
+            let daemon_addr = address_receiver
+                .recv()
+                .map_err(|error| std::io::Error::other(format!("daemon failed to start: {error}")))?
+                .map_err(std::io::Error::other)?;
             let daemon_url = format!("http://{daemon_addr}")
                 .parse()
                 .expect("daemon URL must be a valid URL");

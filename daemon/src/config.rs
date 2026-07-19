@@ -172,6 +172,9 @@ pub struct MediaConfig {
     pub max_directories: usize,
     pub watch_debounce_ms: u64,
     pub fallback_rescan_seconds: u64,
+    pub ignored_directory_names: Vec<String>,
+    /// Zero disables the limit.
+    pub max_file_size_mb: u64,
 }
 
 impl Default for MediaConfig {
@@ -182,6 +185,12 @@ impl Default for MediaConfig {
             max_directories: 512,
             watch_debounce_ms: 1_000,
             fallback_rescan_seconds: 30,
+            ignored_directory_names: vec![
+                "node_modules".to_owned(),
+                ".git".to_owned(),
+                "target".to_owned(),
+            ],
+            max_file_size_mb: 1_024,
         }
     }
 }
@@ -190,6 +199,7 @@ impl Default for MediaConfig {
 pub struct ConfigPaths {
     pub config_file: PathBuf,
     pub database_file: PathBuf,
+    pub thumbnail_cache_dir: PathBuf,
 }
 
 impl ConfigPaths {
@@ -213,9 +223,14 @@ impl ConfigPaths {
             .transpose()?
             .or(configured_database)
             .unwrap_or_else(|| project.data_local_dir().join("puppydrive.db"));
+        let thumbnail_cache_dir = database_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("thumbnails");
         Ok(Self {
             config_file,
             database_file,
+            thumbnail_cache_dir,
         })
     }
 }

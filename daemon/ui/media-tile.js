@@ -9,6 +9,8 @@ export default class MediaTile {
   }
 
   setProps(props) {
+    this.observer?.disconnect();
+    this.observer = null;
     const thumbnailSize = Math.min(
       320,
       Math.max(140, Number(props.thumbnailSize) || 220),
@@ -43,15 +45,25 @@ export default class MediaTile {
 
     if (props.kind === "image") {
       const image = document.createElement("img");
-      image.src = String(props.src);
       image.alt = String(props.name ?? "");
-      image.loading = "lazy";
       image.draggable = false;
       image.style.width = "100%";
       image.style.height = "100%";
       image.style.objectFit = "cover";
       image.style.pointerEvents = "none";
       preview.append(image);
+      const src = String(props.src ?? "");
+      this.observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting || !src) continue;
+            image.src = src;
+            this.observer?.unobserve(preview);
+          }
+        },
+        { root: null, rootMargin: "0px", threshold: 0.01 },
+      );
+      this.observer.observe(preview);
     } else {
       const icon = document.createElement("span");
       icon.textContent = "▶";
@@ -88,6 +100,8 @@ export default class MediaTile {
   }
 
   dispose() {
+    this.observer?.disconnect();
+    this.observer = null;
     this.element.replaceChildren();
   }
 }

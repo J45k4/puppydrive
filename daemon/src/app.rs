@@ -2,7 +2,7 @@
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -20,7 +20,8 @@ use crate::config::{self, AppConfig, BackupSchedule, Theme};
 #[cfg(test)]
 use crate::database::MediaIndexObservation;
 use crate::database::{
-    Database, IndexedMediaFile, LocalSourceConfig, MediaScanPath, Source, local_source_path,
+    Database, IndexedFile, IndexedMediaFile, LocalSourceConfig, MediaScanPath, ScanHistoryEntry,
+    ScanOutcome, ScanTrigger, Source, VirtualDirectory, VirtualDirectoryEntry, local_source_path,
     validate_source_config,
 };
 use crate::indexer::{IndexerEvent, IndexerWorker};
@@ -38,6 +39,7 @@ const LOCAL_TEXT_VIEW_ID: u32 = 28;
 const TOGGLE_FILE_VIEWER_SIZE_ID: u32 = 29;
 const TEXT_VIEW_MODE_ID: u32 = 31;
 const HEX_VIEW_MODE_ID: u32 = 32;
+#[allow(dead_code)]
 const FOLDER_ROW_COMPONENT_ID: u32 = 34;
 const FOLDER_CONTEXT_ID: u32 = 35;
 const CLOSE_FOLDER_CONTEXT_ID: u32 = 36;
@@ -77,6 +79,25 @@ const CLOSE_MEDIA_FOLDER_PICKER_ID: u32 = 69;
 const MEDIA_FOLDER_PICKER_PARENT_ID: u32 = 70;
 const MEDIA_FOLDER_PICKER_NAVIGATE_ID: u32 = 71;
 const SELECT_MEDIA_FOLDER_PICKER_ID: u32 = 72;
+const SHOW_VIRTUAL_DIRECTORY_PICKER_ID: u32 = 73;
+const CLOSE_VIRTUAL_DIRECTORY_PICKER_ID: u32 = 74;
+const ADD_TO_VIRTUAL_DIRECTORY_ID: u32 = 75;
+const CREATE_VIRTUAL_DIRECTORY_ID: u32 = 76;
+const VIRTUAL_DIRECTORY_NAME_INPUT_ID: u32 = 77;
+const SHOW_CREATE_VIRTUAL_DIRECTORY_ID: u32 = 78;
+const CLOSE_CREATE_VIRTUAL_DIRECTORY_ID: u32 = 79;
+const SAVE_CREATE_VIRTUAL_DIRECTORY_ID: u32 = 80;
+const VIRTUAL_FILE_VIEW_ID: u32 = 81;
+const VIRTUAL_DIRECTORY_VIEW_MODE_ID: u32 = 82;
+const INDEXED_FILE_VIEW_ID: u32 = 83;
+const FILES_VIEW_MODE_ID: u32 = 84;
+const FILES_MIME_FILTER_ID: u32 = 85;
+const FILES_SORT_ID: u32 = 86;
+const START_MEDIA_SCAN_ID: u32 = 87;
+const FILES_SCANNED_FOLDER_FILTER_ID: u32 = 88;
+const SCAN_IGNORED_DIRECTORIES_INPUT_ID: u32 = 89;
+const SCAN_MAX_FILE_SIZE_INPUT_ID: u32 = 90;
+const MEDIA_TABLE_SORT_ID: u32 = 91;
 const MAX_FILE_PREVIEW_BYTES: u64 = 1_048_576;
 const MAX_HEX_PREVIEW_BYTES: usize = 65_536;
 const APP_CSS: &str = r#"
@@ -180,10 +201,14 @@ pub struct App {
     expanded_local_dirs: HashSet<PathBuf>,
     video_viewer_asset: StaticAsset,
     image_viewer_asset: StaticAsset,
+    #[allow(dead_code)]
     folder_row_asset: StaticAsset,
     media_tile_asset: StaticAsset,
+    file_table_asset: StaticAsset,
     mobile_nav_asset: StaticAsset,
     media_entries: Vec<LocalEntry>,
+    media_index_entries: Vec<IndexedMediaFile>,
+    indexed_files: Vec<IndexedFile>,
     media_scan_truncated: bool,
     media_scan_errors: Vec<String>,
     media_paths: Vec<MediaScanPath>,
@@ -194,6 +219,8 @@ pub struct App {
     indexer: IndexerWorker,
     indexer_events: tokio::sync::mpsc::Receiver<IndexerEvent>,
     index_status: HashMap<u32, FolderIndexStatus>,
+    selected_scanned_folder_id: Option<u32>,
+    selected_scanned_folder_history: Vec<ScanHistoryEntry>,
     media_watcher: RecommendedWatcher,
     watched_media_paths: Vec<PathBuf>,
     media_change_rx: tokio::sync::mpsc::Receiver<()>,
@@ -205,13 +232,28 @@ pub struct App {
     media_view_mode: String,
     media_sort_key: MediaSortKey,
     media_sort_descending: bool,
+    files_view_mode: String,
+    files_mime_filter: String,
+    files_scanned_folder_filter: String,
+    files_sort: String,
+    scan_ignored_directories: String,
+    scan_max_file_size_mb: String,
     selected_video: Option<VideoFile>,
     selected_image: Option<ImageFile>,
     selected_file: Option<FileViewer>,
+    selected_file_hash: Option<Vec<u8>>,
     file_viewer_entries: Vec<LocalEntry>,
     file_viewer_index: Option<usize>,
     file_viewer_expanded: bool,
     folder_context: Option<FolderContext>,
+    virtual_directories: Vec<VirtualDirectory>,
+    virtual_directory_entries: Vec<VirtualDirectoryEntry>,
+    selected_virtual_directory_id: Option<u32>,
+    virtual_directory_view_mode: String,
+    show_virtual_directory_picker: bool,
+    show_create_virtual_directory: bool,
+    new_virtual_directory_name: String,
+    virtual_directory_error: Option<String>,
     show_add_source: bool,
     new_source_name: String,
     new_source_path: String,
@@ -228,6 +270,7 @@ pub struct App {
     theme: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 struct LocalEntry {
     path: PathBuf,
@@ -242,6 +285,110 @@ struct LocalEntry {
     media_root_id: Option<u32>,
 }
 
+#[derive(Clone)]
+struct FileListingEntry {
+    path: Option<PathBuf>,
+    name: String,
+    size: u64,
+    mime_type: Option<String>,
+    modified_at: Option<SystemTime>,
+    hash: Option<Vec<u8>>,
+    replica_count: usize,
+    media_root_id: Option<u32>,
+}
+
+impl FileListingEntry {
+    fn from_media(entry: &LocalEntry, indexed: &IndexedMediaFile) -> Self {
+        Self {
+            path: Some(entry.path.clone()),
+            name: entry.name.clone(),
+            size: entry.size_bytes,
+            mime_type: indexed.mime_type.clone(),
+            modified_at: entry.modified_at,
+            hash: indexed.hash.clone(),
+            replica_count: indexed.replica_count,
+            media_root_id: entry.media_root_id,
+        }
+    }
+
+    fn from_virtual(entry: &VirtualDirectoryEntry) -> Self {
+        Self {
+            path: entry.path.clone(),
+            name: entry
+                .path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map_or_else(
+                    || "Unavailable file".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+            size: entry.size,
+            mime_type: entry.mime_type.clone(),
+            modified_at: entry.modified_at.and_then(system_time_from_millis),
+            hash: Some(entry.hash.clone()),
+            replica_count: entry.replica_count,
+            media_root_id: entry.scanned_folder_id,
+        }
+    }
+
+    fn from_indexed(entry: &IndexedFile) -> Self {
+        Self {
+            path: Some(entry.path.clone()),
+            name: entry.path.file_name().map_or_else(
+                || entry.path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            size: entry.size,
+            mime_type: entry.mime_type.clone(),
+            modified_at: entry.modified_at.and_then(system_time_from_millis),
+            hash: entry.hash.clone(),
+            replica_count: entry.replica_count,
+            media_root_id: entry.scanned_folder_id,
+        }
+    }
+
+    fn is_image(&self) -> bool {
+        self.path
+            .as_deref()
+            .is_some_and(|path| image_content_type(path).is_some())
+    }
+
+    fn is_video(&self) -> bool {
+        self.path
+            .as_deref()
+            .is_some_and(|path| video_content_type(path).is_some())
+    }
+
+    fn file_type(&self) -> &str {
+        self.mime_type.as_deref().unwrap_or("Unknown")
+    }
+
+    fn hash_label(&self) -> String {
+        self.hash.as_deref().map_or_else(
+            || "Not indexed".to_owned(),
+            |hash| hash.iter().map(|byte| format!("{byte:02x}")).collect(),
+        )
+    }
+
+    fn as_local_entry(&self) -> Option<LocalEntry> {
+        let path = self.path.clone()?;
+        Some(LocalEntry {
+            name: self.name.clone(),
+            path,
+            is_directory: false,
+            is_symlink: false,
+            kind: "Indexed file",
+            size: format_size(self.size),
+            size_bytes: self.size,
+            modified: self
+                .modified_at
+                .map_or_else(|| "—".to_owned(), format_modified),
+            modified_at: self.modified_at,
+            media_root_id: self.media_root_id,
+        })
+    }
+}
+
 #[cfg(test)]
 struct MediaScanResult {
     entries: Vec<LocalEntry>,
@@ -253,8 +400,10 @@ struct MediaScanResult {
 #[derive(Default)]
 struct FolderIndexStatus {
     scanning: bool,
+    queued: bool,
     directories_scanned: usize,
     media_files_indexed: usize,
+    current_path: Option<String>,
     message: Option<String>,
 }
 
@@ -264,6 +413,7 @@ impl LocalEntry {
     }
 }
 
+#[allow(dead_code)]
 struct TreeNode {
     entry: LocalEntry,
     depth: usize,
@@ -306,6 +456,8 @@ struct FolderContext {
 enum AppPage {
     Files,
     Media,
+    ScannedFolder,
+    VirtualDirectories,
     Transfers,
     Settings,
 }
@@ -315,6 +467,7 @@ enum MediaSortKey {
     Name,
     Type,
     Size,
+    Replicas,
     Modified,
 }
 
@@ -349,6 +502,8 @@ impl App {
         }
         let media_paths = database.media_scan_paths()?;
         let local_node_id = database.local_node_id(&config.general.device_name)?;
+        let virtual_directories = database.virtual_directories()?;
+        let virtual_directory_entries = database.virtual_directory_entries(&local_node_id)?;
         let (indexer_event_tx, indexer_events) = tokio::sync::mpsc::channel(256);
         let indexer = IndexerWorker::start(database.path().to_path_buf(), indexer_event_tx);
         let managed_folders = managed_folders(&media_paths);
@@ -381,6 +536,10 @@ impl App {
             "/media-tile.js",
             concat!(env!("CARGO_MANIFEST_DIR"), "/ui/media-tile.js"),
         );
+        let file_table_asset = wgui.mount_static_file(
+            "/file-table.js",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/ui/file-table.js"),
+        );
         let mobile_nav_asset = wgui.mount_static_file(
             "/mobile-nav.js",
             concat!(env!("CARGO_MANIFEST_DIR"), "/ui/mobile-nav.js"),
@@ -388,6 +547,9 @@ impl App {
         let active_files_root = Arc::new(RwLock::new(this_computer_root.clone()));
         let served_media_paths = Arc::new(RwLock::new(media_paths.clone()));
         let served_managed_folders = Arc::new(RwLock::new(managed_folders.clone()));
+        let thumbnail_database_path = database.path().to_path_buf();
+        let thumbnail_cache_dir = paths.thumbnail_cache_dir.clone();
+        let thumbnail_node_id = local_node_id.clone();
         let handler_files_root = active_files_root.clone();
         let handler_media_paths = served_media_paths.clone();
         let handler_managed_folders = served_managed_folders.clone();
@@ -395,6 +557,9 @@ impl App {
             let files_root = handler_files_root.clone();
             let media_paths = handler_media_paths.clone();
             let managed_folders = handler_managed_folders.clone();
+            let thumbnail_database_path = thumbnail_database_path.clone();
+            let thumbnail_cache_dir = thumbnail_cache_dir.clone();
+            let thumbnail_node_id = thumbnail_node_id.clone();
             async move {
                 if request.path == "/favicon.ico" {
                     return Some(
@@ -405,6 +570,22 @@ impl App {
                 if let Some(relative_path) = request.path.strip_prefix("/source-files/") {
                     let root = files_root.read().ok()?.clone();
                     return local_media_response(relative_path, &root);
+                }
+                if let Some(thumbnail_request) = request.path.strip_prefix("/media-thumbnails/") {
+                    let folders = managed_folders.read().ok()?.clone();
+                    let thumbnail_request = thumbnail_request.to_owned();
+                    return tokio::task::spawn_blocking(move || {
+                        media_thumbnail_response(
+                            &thumbnail_request,
+                            &thumbnail_database_path,
+                            &thumbnail_node_id,
+                            &folders,
+                            &thumbnail_cache_dir,
+                        )
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                 }
                 request.path.strip_prefix("/media-files/").and_then(|path| {
                     let (id, relative_path) = path.split_once('/')?;
@@ -423,13 +604,16 @@ impl App {
         let mut expanded_local_dirs = HashSet::new();
         expanded_local_dirs.insert(this_computer_root.clone());
         let cached_media = database.cached_media(&local_node_id)?;
+        let indexed_files = database.cached_files(&local_node_id)?;
+        let scan_ignored_directories = config.media.ignored_directory_names.join(", ");
+        let scan_max_file_size_mb = config.media.max_file_size_mb.to_string();
         let (media_watcher, media_change_rx, watched_media_paths) = build_media_watcher(
             &media_paths,
             Duration::from_millis(config.media.watch_debounce_ms.max(1)),
         )?;
         let media_folder_picker_path = media_folder_picker_start_path(&this_computer_root);
 
-        let mut app = Self {
+        let app = Self {
             wgui,
             bind_addr,
             client_ids: HashSet::new(),
@@ -446,8 +630,11 @@ impl App {
             image_viewer_asset,
             folder_row_asset,
             media_tile_asset,
+            file_table_asset,
             mobile_nav_asset,
-            media_entries: local_entries_from_index(cached_media),
+            media_entries: local_entries_from_index(cached_media.clone()),
+            media_index_entries: cached_media,
+            indexed_files,
             media_scan_truncated: false,
             media_scan_errors: Vec::new(),
             media_paths,
@@ -458,6 +645,8 @@ impl App {
             indexer,
             indexer_events,
             index_status: HashMap::new(),
+            selected_scanned_folder_id: None,
+            selected_scanned_folder_history: Vec::new(),
             media_watcher,
             watched_media_paths,
             media_change_rx,
@@ -469,13 +658,28 @@ impl App {
             media_view_mode: "thumbnails".to_owned(),
             media_sort_key: MediaSortKey::Name,
             media_sort_descending: false,
+            files_view_mode: "table".to_owned(),
+            files_mime_filter: "all".to_owned(),
+            files_scanned_folder_filter: "all".to_owned(),
+            files_sort: "modified".to_owned(),
+            scan_ignored_directories,
+            scan_max_file_size_mb,
             selected_video: None,
             selected_image: None,
             selected_file: None,
+            selected_file_hash: None,
             file_viewer_entries: Vec::new(),
             file_viewer_index: None,
             file_viewer_expanded: false,
             folder_context: None,
+            virtual_directories,
+            virtual_directory_entries,
+            selected_virtual_directory_id: None,
+            virtual_directory_view_mode: "table".to_owned(),
+            show_virtual_directory_picker: false,
+            show_create_virtual_directory: false,
+            new_virtual_directory_name: String::new(),
+            virtual_directory_error: None,
             show_add_source: false,
             new_source_name: String::new(),
             new_source_path: String::new(),
@@ -492,7 +696,6 @@ impl App {
             theme: String::new(),
         }
         .with_configured_settings();
-        app.queue_media_index();
         Ok(app)
     }
 
@@ -526,6 +729,11 @@ impl App {
             .padding(6),
             nav_link("□  Files", "/", self.active_page == AppPage::Files),
             nav_link("▧  Media", "/media", self.active_page == AppPage::Media),
+            nav_link(
+                "◫  Virtual directories",
+                "/virtual-directories",
+                self.active_page == AppPage::VirtualDirectories,
+            ),
             nav_link(
                 "⇄  Transfers",
                 "/transfers",
@@ -581,6 +789,16 @@ impl App {
         let workspace = match self.active_page {
             AppPage::Settings => self.settings_panel().grow(1).padding(6).overflow("hidden"),
             AppPage::Media => self.media_panel().grow(1).padding(6).overflow("hidden"),
+            AppPage::ScannedFolder => self
+                .scanned_folder_detail_panel()
+                .grow(1)
+                .padding(6)
+                .overflow("hidden"),
+            AppPage::VirtualDirectories => self
+                .virtual_directories_panel()
+                .grow(1)
+                .padding(6)
+                .overflow("hidden"),
             AppPage::Transfers => self.transfers_panel().grow(1).padding(6).overflow("hidden"),
             AppPage::Files => content,
         };
@@ -588,6 +806,8 @@ impl App {
         let page_title = match self.active_page {
             AppPage::Files => "Files",
             AppPage::Media => "Media",
+            AppPage::ScannedFolder => "Scanned folder",
+            AppPage::VirtualDirectories => "Virtual directories",
             AppPage::Transfers => "Transfers",
             AppPage::Settings => "Settings",
         };
@@ -626,6 +846,12 @@ impl App {
         if self.show_media_folder_picker {
             shell.push(self.media_folder_picker_modal());
         }
+        if self.show_virtual_directory_picker {
+            shell.push(self.virtual_directory_picker_modal());
+        }
+        if self.show_create_virtual_directory {
+            shell.push(self.create_virtual_directory_modal());
+        }
 
         hstack(shell).fill(true).overflow("hidden")
     }
@@ -638,7 +864,7 @@ impl App {
                     if changed.is_none() {
                         break;
                     }
-                    self.queue_media_index();
+                    self.queue_media_index(ScanTrigger::FilesystemChange);
                     self.render_all_clients().await;
                     continue;
                 }
@@ -665,16 +891,53 @@ impl App {
                     log::info!("wgui client {client_id} disconnected");
                 }
                 ClientEvent::PathChanged(change) => {
-                    self.active_page = match change.path.trim_end_matches('/') {
+                    let path = change.path.trim_end_matches('/');
+                    let scanned_folder_id = path
+                        .strip_prefix("/scanned-folders/")
+                        .and_then(|id| id.parse::<u32>().ok())
+                        .filter(|id| self.media_paths.iter().any(|folder| folder.id == *id));
+                    self.active_page = match path {
                         "/media" => AppPage::Media,
+                        _ if scanned_folder_id.is_some() => {
+                            self.selected_scanned_folder_id = scanned_folder_id;
+                            self.refresh_selected_scanned_folder_history();
+                            AppPage::ScannedFolder
+                        }
+                        "/virtual-directories" => {
+                            self.selected_virtual_directory_id = None;
+                            AppPage::VirtualDirectories
+                        }
                         "/transfers" => AppPage::Transfers,
                         "/settings" => AppPage::Settings,
+                        _ if path
+                            .strip_prefix("/virtual-directories/")
+                            .and_then(|id| id.parse::<u32>().ok())
+                            .is_some_and(|id| {
+                                self.virtual_directories
+                                    .iter()
+                                    .any(|directory| directory.id == id)
+                            }) =>
+                        {
+                            self.selected_virtual_directory_id = path
+                                .strip_prefix("/virtual-directories/")
+                                .and_then(|id| id.parse::<u32>().ok());
+                            AppPage::VirtualDirectories
+                        }
                         _ => AppPage::Files,
                     };
                     if self.active_page != AppPage::Files {
                         self.close_file_viewer();
                         self.folder_context = None;
                         self.show_add_source = false;
+                        self.show_virtual_directory_picker = false;
+                        self.show_create_virtual_directory = false;
+                    }
+                    if self.active_page != AppPage::VirtualDirectories {
+                        self.selected_virtual_directory_id = None;
+                    }
+                    if self.active_page != AppPage::ScannedFolder {
+                        self.selected_scanned_folder_id = None;
+                        self.selected_scanned_folder_history.clear();
                     }
                 }
                 ClientEvent::OnTextChanged(change) if change.id == DEVICE_NAME_INPUT_ID => {
@@ -699,6 +962,21 @@ impl App {
                 ClientEvent::OnSelect(change) if change.id == MEDIA_VIEW_MODE_ID => {
                     self.media_view_mode = change.value;
                 }
+                ClientEvent::OnSelect(change) if change.id == VIRTUAL_DIRECTORY_VIEW_MODE_ID => {
+                    self.virtual_directory_view_mode = change.value;
+                }
+                ClientEvent::OnSelect(change) if change.id == FILES_VIEW_MODE_ID => {
+                    self.files_view_mode = change.value;
+                }
+                ClientEvent::OnSelect(change) if change.id == FILES_MIME_FILTER_ID => {
+                    self.files_mime_filter = change.value;
+                }
+                ClientEvent::OnSelect(change) if change.id == FILES_SCANNED_FOLDER_FILTER_ID => {
+                    self.files_scanned_folder_filter = change.value;
+                }
+                ClientEvent::OnSelect(change) if change.id == FILES_SORT_ID => {
+                    self.files_sort = change.value;
+                }
                 ClientEvent::OnSliderChange(change) if change.id == MEDIA_THUMBNAIL_SIZE_ID => {
                     self.media_thumbnail_size = change.value.clamp(140, 320);
                 }
@@ -711,6 +989,32 @@ impl App {
                 ClientEvent::OnTextChanged(change) if change.id == ADD_MEDIA_PATH_INPUT_ID => {
                     self.new_media_path = change.value;
                     self.media_path_error = None;
+                }
+                ClientEvent::OnTextChanged(change)
+                    if change.id == SCAN_IGNORED_DIRECTORIES_INPUT_ID =>
+                {
+                    self.scan_ignored_directories = change.value;
+                    self.config.media.ignored_directory_names = self
+                        .scan_ignored_directories
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    self.save_config();
+                }
+                ClientEvent::OnTextChanged(change) if change.id == SCAN_MAX_FILE_SIZE_INPUT_ID => {
+                    self.scan_max_file_size_mb = change.value;
+                    if let Ok(limit) = self.scan_max_file_size_mb.trim().parse() {
+                        self.config.media.max_file_size_mb = limit;
+                        self.save_config();
+                    }
+                }
+                ClientEvent::OnTextChanged(change)
+                    if change.id == VIRTUAL_DIRECTORY_NAME_INPUT_ID =>
+                {
+                    self.new_virtual_directory_name = change.value;
+                    self.virtual_directory_error = None;
                 }
                 ClientEvent::OnKeyDown(key) if key.keycode == "ArrowLeft" => {
                     self.navigate_file_viewer(-1);
@@ -741,6 +1045,26 @@ impl App {
                 ClientEvent::OnCustom(event) if event.id == LOCAL_MEDIA_VIEW_ID => {
                     if let Some(index) = custom_event_index(&event.payload) {
                         self.open_media(index);
+                    }
+                }
+                ClientEvent::OnCustom(event) if event.id == MEDIA_TABLE_SORT_ID => {
+                    if self.active_page == AppPage::Media {
+                        if let Some(key) = media_sort_key_from_payload(&event.payload) {
+                            self.toggle_media_sort(key);
+                        }
+                    }
+                }
+                ClientEvent::OnCustom(event) if event.id == VIRTUAL_FILE_VIEW_ID => {
+                    if let (Some(directory_id), Some(index)) = (
+                        self.selected_virtual_directory_id,
+                        custom_event_index(&event.payload),
+                    ) {
+                        self.open_virtual_file(directory_id, index);
+                    }
+                }
+                ClientEvent::OnCustom(event) if event.id == INDEXED_FILE_VIEW_ID => {
+                    if let Some(index) = custom_event_index(&event.payload) {
+                        self.open_indexed_file(index);
                     }
                 }
                 ClientEvent::OnClick(click) => match click.id {
@@ -786,6 +1110,34 @@ impl App {
                         }
                     }
                     CLOSE_FILE_VIEWER_ID => self.close_file_viewer(),
+                    SHOW_VIRTUAL_DIRECTORY_PICKER_ID => {
+                        if self.selected_file_hash.is_some() {
+                            self.show_virtual_directory_picker = true;
+                            self.virtual_directory_error = None;
+                        }
+                    }
+                    CLOSE_VIRTUAL_DIRECTORY_PICKER_ID => {
+                        self.show_virtual_directory_picker = false;
+                        self.virtual_directory_error = None;
+                    }
+                    ADD_TO_VIRTUAL_DIRECTORY_ID => {
+                        if let Some(id) = click.inx {
+                            self.add_selected_file_to_virtual_directory(id);
+                        }
+                    }
+                    CREATE_VIRTUAL_DIRECTORY_ID => {
+                        self.create_virtual_directory_for_selected_file()
+                    }
+                    SHOW_CREATE_VIRTUAL_DIRECTORY_ID => {
+                        self.show_create_virtual_directory = true;
+                        self.new_virtual_directory_name.clear();
+                        self.virtual_directory_error = None;
+                    }
+                    CLOSE_CREATE_VIRTUAL_DIRECTORY_ID => {
+                        self.show_create_virtual_directory = false;
+                        self.virtual_directory_error = None;
+                    }
+                    SAVE_CREATE_VIRTUAL_DIRECTORY_ID => self.create_empty_virtual_directory(),
                     PREVIOUS_FILE_VIEWER_ID => self.navigate_file_viewer(-1),
                     NEXT_FILE_VIEWER_ID => self.navigate_file_viewer(1),
                     TOGGLE_FILE_VIEWER_SIZE_ID => {
@@ -811,12 +1163,29 @@ impl App {
                             self.open_media(index as usize);
                         }
                     }
+                    VIRTUAL_FILE_VIEW_ID => {
+                        if let (Some(directory_id), Some(index)) =
+                            (self.selected_virtual_directory_id, click.inx)
+                        {
+                            self.open_virtual_file(directory_id, index as usize);
+                        }
+                    }
+                    INDEXED_FILE_VIEW_ID => {
+                        if let Some(index) = click.inx {
+                            self.open_indexed_file(index as usize);
+                        }
+                    }
                     MEDIA_SORT_NAME_ID => self.toggle_media_sort(MediaSortKey::Name),
                     MEDIA_SORT_TYPE_ID => self.toggle_media_sort(MediaSortKey::Type),
                     MEDIA_SORT_SIZE_ID => self.toggle_media_sort(MediaSortKey::Size),
                     MEDIA_SORT_MODIFIED_ID => self.toggle_media_sort(MediaSortKey::Modified),
                     REFRESH_MEDIA_ID => {
-                        self.queue_media_index();
+                        self.queue_media_index(ScanTrigger::ManualRefresh);
+                    }
+                    START_MEDIA_SCAN_ID => {
+                        if let Some(id) = click.inx {
+                            self.queue_media_index_for(id);
+                        }
                     }
                     TEXT_VIEW_MODE_ID => self.set_file_view_mode(FileViewMode::Text),
                     HEX_VIEW_MODE_ID => self.set_file_view_mode(FileViewMode::Hex),
@@ -1098,11 +1467,7 @@ impl App {
         let Some(entry) = self.media_entries.get(index).cloned() else {
             return;
         };
-        let indices = if self.media_view_mode == "table" {
-            self.sorted_media_indices()
-        } else {
-            (0..self.media_entries.len()).collect()
-        };
+        let indices = self.sorted_media_indices();
         let Some(viewer_index) = indices.iter().position(|candidate| *candidate == index) else {
             return;
         };
@@ -1110,6 +1475,40 @@ impl App {
             .into_iter()
             .filter_map(|index| self.media_entries.get(index).cloned())
             .collect();
+        self.file_viewer_index = None;
+        self.file_viewer_expanded = false;
+        if self.select_viewer_entry(&entry) {
+            self.file_viewer_index = Some(viewer_index);
+        }
+    }
+
+    fn virtual_listing_entries(&self, directory_id: u32) -> Vec<FileListingEntry> {
+        self.virtual_directory_entries
+            .iter()
+            .filter(|entry| entry.virtual_directory_id == directory_id)
+            .map(FileListingEntry::from_virtual)
+            .collect()
+    }
+
+    fn open_virtual_file(&mut self, directory_id: u32, index: usize) {
+        let entries = self.virtual_listing_entries(directory_id);
+        let Some(entry) = entries
+            .get(index)
+            .and_then(FileListingEntry::as_local_entry)
+        else {
+            return;
+        };
+        let viewer_entries = entries
+            .iter()
+            .filter_map(FileListingEntry::as_local_entry)
+            .collect::<Vec<_>>();
+        let Some(viewer_index) = viewer_entries
+            .iter()
+            .position(|candidate| candidate.path == entry.path)
+        else {
+            return;
+        };
+        self.file_viewer_entries = viewer_entries;
         self.file_viewer_index = None;
         self.file_viewer_expanded = false;
         if self.select_viewer_entry(&entry) {
@@ -1126,6 +1525,9 @@ impl App {
                 MediaSortKey::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
                 MediaSortKey::Type => media_kind(left).cmp(media_kind(right)),
                 MediaSortKey::Size => left.size_bytes.cmp(&right.size_bytes),
+                MediaSortKey::Replicas => self.media_index_entries[*left_index]
+                    .replica_count
+                    .cmp(&self.media_index_entries[*right_index].replica_count),
                 MediaSortKey::Modified => left.modified_at.cmp(&right.modified_at),
             }
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
@@ -1157,6 +1559,11 @@ impl App {
         let Some(source_url) = self.entry_source_url(entry, &path) else {
             return false;
         };
+        self.selected_file_hash = self
+            .database
+            .file_hash_for_location(&self.local_node_id, &path)
+            .ok()
+            .flatten();
         self.selected_video = Some(VideoFile {
             name: entry.name.clone(),
             size: entry.size.clone(),
@@ -1178,6 +1585,11 @@ impl App {
         let Some(source_url) = self.entry_source_url(entry, &path) else {
             return false;
         };
+        self.selected_file_hash = self
+            .database
+            .file_hash_for_location(&self.local_node_id, &path)
+            .ok()
+            .flatten();
         self.selected_image = Some(ImageFile {
             name: entry.name.clone(),
             size: entry.size.clone(),
@@ -1206,7 +1618,9 @@ impl App {
         let Ok(path) = self.canonicalize_for_read(&entry.path) else {
             return false;
         };
-        if !path.starts_with(&self.this_computer_root) {
+        if !path.starts_with(&self.this_computer_root)
+            && self.managed_folder_for_path(&path).is_none()
+        {
             return false;
         }
         let bytes = match self.read_for_preview(&path) {
@@ -1224,6 +1638,11 @@ impl App {
             FileViewMode::Hex
         };
 
+        self.selected_file_hash = self
+            .database
+            .file_hash_for_location(&self.local_node_id, &path)
+            .ok()
+            .flatten();
         self.selected_file = Some(FileViewer {
             name: entry.name.clone(),
             size: entry.size.clone(),
@@ -1299,9 +1718,78 @@ impl App {
         self.selected_video = None;
         self.selected_image = None;
         self.selected_file = None;
+        self.selected_file_hash = None;
         self.file_viewer_entries.clear();
         self.file_viewer_index = None;
         self.file_viewer_expanded = false;
+        self.show_virtual_directory_picker = false;
+        self.virtual_directory_error = None;
+    }
+
+    fn reload_virtual_directories(&mut self) {
+        match self.database.virtual_directories() {
+            Ok(directories) => self.virtual_directories = directories,
+            Err(error) => log::warn!("could not load virtual directories: {error:#}"),
+        }
+        match self.database.virtual_directory_entries(&self.local_node_id) {
+            Ok(entries) => self.virtual_directory_entries = entries,
+            Err(error) => log::warn!("could not load virtual directory entries: {error:#}"),
+        }
+    }
+
+    fn add_selected_file_to_virtual_directory(&mut self, directory_id: u32) {
+        let Some(hash) = self.selected_file_hash.as_deref() else {
+            self.virtual_directory_error = Some("This file has not been indexed yet.".to_owned());
+            return;
+        };
+        match self
+            .database
+            .add_file_to_virtual_directory(directory_id, hash)
+        {
+            Ok(()) => {
+                self.reload_virtual_directories();
+                self.show_virtual_directory_picker = false;
+                self.new_virtual_directory_name.clear();
+                self.virtual_directory_error = None;
+            }
+            Err(error) => {
+                self.virtual_directory_error = Some(format!("Could not add file: {error:#}"));
+            }
+        }
+    }
+
+    fn create_virtual_directory_for_selected_file(&mut self) {
+        match self
+            .database
+            .create_virtual_directory(&self.new_virtual_directory_name)
+        {
+            Ok(directory) => {
+                self.reload_virtual_directories();
+                self.add_selected_file_to_virtual_directory(directory.id);
+            }
+            Err(error) => {
+                self.virtual_directory_error =
+                    Some(format!("Could not create directory: {error:#}"));
+            }
+        }
+    }
+
+    fn create_empty_virtual_directory(&mut self) {
+        match self
+            .database
+            .create_virtual_directory(&self.new_virtual_directory_name)
+        {
+            Ok(_) => {
+                self.reload_virtual_directories();
+                self.show_create_virtual_directory = false;
+                self.new_virtual_directory_name.clear();
+                self.virtual_directory_error = None;
+            }
+            Err(error) => {
+                self.virtual_directory_error =
+                    Some(format!("Could not create directory: {error:#}"));
+            }
+        }
     }
 
     fn set_file_view_mode(&mut self, mode: FileViewMode) {
@@ -1359,23 +1847,79 @@ impl App {
         }
     }
 
-    fn queue_media_index(&mut self) {
+    fn queue_media_index(&mut self, trigger: ScanTrigger) {
+        log::info!(
+            "queueing scan for all {} scanned folders",
+            self.media_paths.len()
+        );
         self.indexer.request_scan(
             self.media_paths.clone(),
             self.local_node_id.clone(),
             self.config.media.max_items,
             self.config.media.max_directories,
+            self.config.media.ignored_directory_names.clone(),
+            self.config
+                .media
+                .max_file_size_mb
+                .saturating_mul(1_024 * 1_024),
+            trigger,
+        );
+    }
+
+    fn queue_media_index_for(&mut self, folder_id: u32) {
+        if self
+            .index_status
+            .get(&folder_id)
+            .is_some_and(|status| status.scanning)
+        {
+            log::info!("scan requested for scanned folder {folder_id}, but it is already scanning");
+            return;
+        }
+        let folders: Vec<MediaScanPath> = self
+            .media_paths
+            .iter()
+            .filter(|folder| folder.id == folder_id)
+            .cloned()
+            .collect();
+        if folders.is_empty() {
+            log::warn!("scan requested for unknown scanned folder id {folder_id}");
+            return;
+        }
+        log::info!(
+            "queueing scan for scanned folder {folder_id}: {}",
+            folders[0].path
+        );
+        self.indexer.request_scan(
+            folders,
+            self.local_node_id.clone(),
+            self.config.media.max_items,
+            self.config.media.max_directories,
+            self.config.media.ignored_directory_names.clone(),
+            self.config
+                .media
+                .max_file_size_mb
+                .saturating_mul(1_024 * 1_024),
+            ScanTrigger::ManualFolder,
+        );
+        self.index_status.insert(
+            folder_id,
+            FolderIndexStatus {
+                queued: true,
+                ..Default::default()
+            },
         );
     }
 
     fn handle_indexer_event(&mut self, event: IndexerEvent) {
         match event {
             IndexerEvent::Started { folder_ids } => {
+                log::info!("indexer started scan for folders {folder_ids:?}");
                 for folder_id in folder_ids {
                     self.index_status.insert(
                         folder_id,
                         FolderIndexStatus {
                             scanning: true,
+                            queued: false,
                             ..Default::default()
                         },
                     );
@@ -1385,22 +1929,61 @@ impl App {
                 folder_id,
                 directories_scanned,
                 media_files_indexed,
+                current_path,
             } => {
                 let status = self.index_status.entry(folder_id).or_default();
                 status.scanning = true;
                 status.directories_scanned = directories_scanned;
                 status.media_files_indexed = media_files_indexed;
+                status.current_path = current_path;
             }
-            IndexerEvent::FolderFinished { folder_id } => {
+            IndexerEvent::FolderFinished { history } => {
+                let folder_id = history.scanned_folder_id;
+                log::info!("indexer finished scanned folder {folder_id}");
                 if let Some(status) = self.index_status.get_mut(&folder_id) {
                     status.scanning = false;
+                    status.message = (history.outcome != ScanOutcome::Completed)
+                        .then(|| history.error_message.clone())
+                        .flatten();
+                }
+                if self.selected_scanned_folder_id == Some(folder_id) {
+                    self.refresh_selected_scanned_folder_history();
                 }
             }
             IndexerEvent::Finished { truncated, errors } => {
+                if errors.is_empty() {
+                    log::info!("indexer scan completed (truncated: {truncated})");
+                } else {
+                    log::warn!(
+                        "indexer scan completed with {} errors (truncated: {truncated}): {}",
+                        errors.len(),
+                        errors.join("; ")
+                    );
+                }
                 self.media_scan_truncated = truncated;
-                self.media_scan_errors = errors;
+                self.media_scan_errors = errors.clone();
+                for status in self
+                    .index_status
+                    .values_mut()
+                    .filter(|status| status.queued)
+                {
+                    status.queued = false;
+                    if !errors.is_empty() {
+                        status.message = Some(errors.join("; "));
+                    }
+                }
                 match self.database.cached_media(&self.local_node_id) {
-                    Ok(entries) => self.media_entries = local_entries_from_index(entries),
+                    Ok(entries) => {
+                        self.media_entries = local_entries_from_index(entries.clone());
+                        self.media_index_entries = entries;
+                        self.indexed_files = self
+                            .database
+                            .cached_files(&self.local_node_id)
+                            .unwrap_or_else(|error| {
+                                log::error!("failed loading persistent file index: {error:#}");
+                                Vec::new()
+                            });
+                    }
                     Err(error) => log::error!("failed loading persistent Media index: {error:#}"),
                 }
             }
@@ -1415,6 +1998,46 @@ impl App {
                     status.message = Some(message.clone());
                 }
             }
+        }
+    }
+
+    fn refresh_selected_scanned_folder_history(&mut self) {
+        let Some(folder_id) = self.selected_scanned_folder_id else {
+            return;
+        };
+        match self.database.scanned_folder_scan_history(folder_id) {
+            Ok(history) => self.selected_scanned_folder_history = history,
+            Err(error) => {
+                log::error!("failed loading scanned-folder history: {error:#}");
+                self.selected_scanned_folder_history.clear();
+            }
+        }
+    }
+
+    fn scan_status_text(&self, path: &MediaScanPath) -> String {
+        if !Path::new(&path.path).is_dir() {
+            "Folder is unavailable".to_owned()
+        } else if !path.enabled {
+            "Media indexing paused".to_owned()
+        } else if let Some(status) = self.index_status.get(&path.id) {
+            if status.scanning {
+                let mut status_text = format!(
+                    "Scanning • {} folders • {} files",
+                    status.directories_scanned, status.media_files_indexed
+                );
+                if let Some(path) = &status.current_path {
+                    status_text.push_str(&format!(" • {}", display_file_name(path)));
+                }
+                status_text
+            } else if status.queued {
+                "Scan queued".to_owned()
+            } else if let Some(message) = &status.message {
+                format!("Indexing error • {message}")
+            } else {
+                "Media indexing active".to_owned()
+            }
+        } else {
+            "Media indexing active".to_owned()
         }
     }
 
@@ -1590,7 +2213,7 @@ impl App {
             *served_folders = self.managed_folders.clone();
         }
         self.reconfigure_media_watcher();
-        self.queue_media_index();
+        self.queue_media_index(ScanTrigger::FilesystemChange);
     }
 
     fn reconfigure_media_watcher(&mut self) {
@@ -1682,20 +2305,25 @@ fn media_kind(entry: &LocalEntry) -> &'static str {
     }
 }
 
-fn media_sort_button(label: &str, id: u32, active: bool, descending: bool) -> Item {
-    let label = if active {
-        format!("{label} {}", if descending { "↓" } else { "↑" })
-    } else {
-        label.to_owned()
-    };
-    button(&label)
-        .id(id)
-        .padding(3)
-        .border("1px solid transparent")
-        .background_color("#f8fafb")
-        .color(if active { "#0f6175" } else { "#6b7280" })
-        .text_align("left")
-        .cursor("pointer")
+fn media_sort_key_name(key: MediaSortKey) -> &'static str {
+    match key {
+        MediaSortKey::Name => "name",
+        MediaSortKey::Type => "type",
+        MediaSortKey::Size => "sizeValue",
+        MediaSortKey::Replicas => "replicaCount",
+        MediaSortKey::Modified => "modifiedValue",
+    }
+}
+
+fn media_sort_key_from_payload(payload: &serde_json::Value) -> Option<MediaSortKey> {
+    let key = payload.get("key")?.as_str()?;
+    match key {
+        "name" => Some(MediaSortKey::Name),
+        "sizeValue" => Some(MediaSortKey::Size),
+        "replicaCount" => Some(MediaSortKey::Replicas),
+        "modifiedValue" => Some(MediaSortKey::Modified),
+        _ => None,
+    }
 }
 
 fn settings_row(title: &str, description: &str, control: Item) -> Item {
@@ -1723,6 +2351,167 @@ fn settings_section(title: &str, rows: impl IntoIterator<Item = Item>) -> Item {
 }
 
 impl App {
+    fn filtered_file_entries(&self) -> Vec<FileListingEntry> {
+        let mut entries = self
+            .indexed_files
+            .iter()
+            .filter(|entry| {
+                self.files_scanned_folder_filter == "all"
+                    || entry
+                        .scanned_folder_id
+                        .is_some_and(|id| id.to_string() == self.files_scanned_folder_filter)
+            })
+            .map(FileListingEntry::from_indexed)
+            .filter(|entry| match self.files_mime_filter.as_str() {
+                "images" => entry.is_image(),
+                "videos" => entry.is_video(),
+                "other" => !entry.is_image() && !entry.is_video(),
+                _ => true,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| match self.files_sort.as_str() {
+            "name" => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+            "size" => right.size.cmp(&left.size),
+            _ => right.modified_at.cmp(&left.modified_at),
+        });
+        entries
+    }
+
+    fn open_indexed_file(&mut self, index: usize) {
+        let entries = self.filtered_file_entries();
+        let Some(entry) = entries
+            .get(index)
+            .and_then(FileListingEntry::as_local_entry)
+        else {
+            return;
+        };
+        let viewer_entries = entries
+            .iter()
+            .filter_map(FileListingEntry::as_local_entry)
+            .collect::<Vec<_>>();
+        let Some(viewer_index) = viewer_entries
+            .iter()
+            .position(|candidate| candidate.path == entry.path)
+        else {
+            return;
+        };
+        self.file_viewer_entries = viewer_entries;
+        self.file_viewer_index = None;
+        self.file_viewer_expanded = false;
+        if self.select_viewer_entry(&entry) {
+            self.file_viewer_index = Some(viewer_index);
+        }
+    }
+
+    fn media_listing_entries(&self) -> Vec<FileListingEntry> {
+        self.media_entries
+            .iter()
+            .zip(&self.media_index_entries)
+            .map(|(entry, indexed)| FileListingEntry::from_media(entry, indexed))
+            .collect()
+    }
+
+    fn file_listing(
+        &self,
+        entries: &[FileListingEntry],
+        view_mode: &str,
+        thumbnail_size: u32,
+        open_id: u32,
+        indices: impl IntoIterator<Item = usize>,
+        media_sort: Option<(MediaSortKey, bool)>,
+    ) -> Item {
+        let indices = indices.into_iter().collect::<Vec<_>>();
+        if entries.is_empty() {
+            return vstack([text("No files found.").color("#6b7280")])
+                .grow(1)
+                .padding(24)
+                .background_color("#f8fafb");
+        }
+        if view_mode == "table" {
+            let rows = indices.into_iter().filter_map(|index| {
+                let entry = entries.get(index)?;
+                Some(serde_json::json!({
+                    "index": index,
+                    "icon": if entry.is_image() { "▧" } else if entry.is_video() { "▣" } else { "□" },
+                    "name": entry.name,
+                    "type": entry.file_type(),
+                    "size": format_size(entry.size),
+                    "sizeValue": entry.size,
+                    "hash": entry.hash_label(),
+                    "replicas": replica_label(entry.replica_count),
+                    "replicaCount": entry.replica_count,
+                    "modified": entry.modified_at.map_or_else(|| "—".to_owned(), format_modified),
+                    "modifiedValue": entry.modified_at.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|duration| duration.as_millis()).unwrap_or(0),
+                }))
+            }).collect::<Vec<_>>();
+            return custom_component(
+                "file-table",
+                self.file_table_asset.url(),
+                serde_json::json!({
+                    "rows": rows,
+                    "serverSort": media_sort.is_some(),
+                    "sortKey": media_sort.map(|(key, _)| media_sort_key_name(key)),
+                    "sortDescending": media_sort.is_some_and(|(_, descending)| descending),
+                }),
+            )
+            .custom_event("open", open_id)
+            .custom_event("sort", MEDIA_TABLE_SORT_ID)
+            .grow(1)
+            .fill(true)
+            .width(0)
+            .overflow("hidden");
+        }
+        let tile_height = thumbnail_size.saturating_mul(3) / 4 + 60;
+        let tiles = indices.into_iter().filter_map(|index| {
+            let entry = entries.get(index)?;
+            let source_url = entry.path.as_ref().and_then(|path| {
+                let root = self.media_paths.iter().find(|root| Some(root.id) == entry.media_root_id)?;
+                media_source_url(root, path)
+            });
+            let thumbnail_url = entry.is_image().then(|| media_thumbnail_url(entry)).flatten();
+            let preview_url = if entry.is_image() {
+                thumbnail_url
+            } else {
+                source_url
+            };
+            Some(if (entry.is_image() || entry.is_video()) && preview_url.is_some() {
+                custom_component(
+                    "media-tile",
+                    self.media_tile_asset.url(),
+                    serde_json::json!({
+                        "index": index,
+                        "name": entry.name,
+                        "kind": if entry.is_image() { "image" } else { "video" },
+                        "src": preview_url,
+                        "size": format_size(entry.size),
+                        "modified": entry.modified_at.map_or_else(|| "—".to_owned(), format_modified),
+                        "thumbnailSize": thumbnail_size,
+                    }),
+                )
+                .custom_event("open", open_id)
+                .width(thumbnail_size)
+                .height(tile_height)
+            } else {
+                button(&format!("□\n{}\n{}", entry.name, format_size(entry.size)))
+                    .id(open_id)
+                    .inx(index as u32)
+                    .width(thumbnail_size)
+                    .height(tile_height)
+                    .padding(10)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff")
+                    .color("#0f6175")
+                    .text_align("left")
+            })
+        });
+        hstack(tiles)
+            .wrap(true)
+            .spacing(12)
+            .grow(1)
+            .padding(4)
+            .overflow("auto")
+    }
+
     fn media_panel(&self) -> Item {
         let image_count = self
             .media_entries
@@ -1745,37 +2534,8 @@ impl App {
         }
         let showing_thumbnails = self.media_view_mode != "table";
         let thumbnail_size = self.media_thumbnail_size.clamp(140, 320) as u32;
-        let tile_height = thumbnail_size.saturating_mul(3) / 4 + 60;
-        let tiles = self
-            .media_entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                let root_id = entry.media_root_id?;
-                let root = self.media_paths.iter().find(|root| root.id == root_id)?;
-                let source_url = media_source_url(root, &entry.path)?;
-                Some(
-                    custom_component(
-                        "media-tile",
-                        self.media_tile_asset.url(),
-                        serde_json::json!({
-                            "index": index,
-                            "name": entry.name,
-                            "kind": if is_image_file(entry) { "image" } else { "video" },
-                            "src": source_url,
-                            "size": entry.size,
-                            "modified": entry.modified,
-                            "thumbnailSize": thumbnail_size,
-                        }),
-                    )
-                    .custom_event("open", LOCAL_MEDIA_VIEW_ID)
-                    .width(thumbnail_size)
-                    .height(tile_height),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let media_content = if tiles.is_empty() {
+        let listing_entries = self.media_listing_entries();
+        let media_content = if listing_entries.is_empty() {
             vstack([
                 text("No media found").color("#374151"),
                 text("Images and videos from active Scanned folders will appear here.")
@@ -1785,15 +2545,15 @@ impl App {
             .spacing(4)
             .padding(24)
             .background_color("#f8fafb")
-        } else if showing_thumbnails {
-            hstack(tiles)
-                .wrap(true)
-                .spacing(12)
-                .grow(1)
-                .padding(4)
-                .overflow("auto")
         } else {
-            self.media_table()
+            self.file_listing(
+                &listing_entries,
+                &self.media_view_mode,
+                thumbnail_size,
+                LOCAL_MEDIA_VIEW_ID,
+                self.sorted_media_indices(),
+                Some((self.media_sort_key, self.media_sort_descending)),
+            )
         };
 
         let size_control = if showing_thumbnails {
@@ -1848,69 +2608,163 @@ impl App {
         .overflow("hidden")
     }
 
-    fn media_table(&self) -> Item {
-        let rows = self.sorted_media_indices().into_iter().map(|index| {
-            let entry = &self.media_entries[index];
-            hstack([
-                text(if is_image_file(entry) { "▧" } else { "▣" }).width(26),
-                button(&entry.name)
-                    .id(LOCAL_MEDIA_VIEW_ID)
-                    .inx(index as u32)
-                    .grow(1)
-                    .min_width(0)
-                    .padding(3)
-                    .border("1px solid transparent")
+    fn virtual_directories_panel(&self) -> Item {
+        if let Some(directory) = self.selected_virtual_directory_id.and_then(|id| {
+            self.virtual_directories
+                .iter()
+                .find(|directory| directory.id == id)
+        }) {
+            return self.virtual_directory_detail_panel(directory);
+        }
+        let directories = self.virtual_directories.iter().map(|directory| {
+            let entries = self
+                .virtual_directory_entries
+                .iter()
+                .filter(|entry| entry.virtual_directory_id == directory.id)
+                .map(|entry| {
+                    let name = entry
+                        .path
+                        .as_ref()
+                        .and_then(|path| path.file_name())
+                        .map_or_else(
+                            || "Unavailable file".to_owned(),
+                            |name| name.to_string_lossy().into_owned(),
+                        );
+                    let location = entry.path.as_ref().map_or_else(
+                        || "No current location — the file entry is retained.".to_owned(),
+                        |path| path.display().to_string(),
+                    );
+                    let modified = entry
+                        .modified_at
+                        .and_then(system_time_from_millis)
+                        .map_or_else(|| "—".to_owned(), format_modified);
+                    hstack([
+                        vstack([
+                            text(&name).color("#1f2937"),
+                            text(&location).color("#6b7280").break_words(true),
+                        ])
+                        .grow(1)
+                        .spacing(2),
+                        vstack([
+                            text(&format_size(entry.size)).color("#4b5563"),
+                            text(entry.mime_type.as_deref().unwrap_or("Unknown type"))
+                                .color("#6b7280"),
+                            text(&modified).color("#6b7280"),
+                        ])
+                        .width(150)
+                        .spacing(2),
+                    ])
+                    .spacing(12)
+                    .padding(8)
+                    .border("1px solid #e4ebed")
                     .background_color("#ffffff")
+                })
+                .collect::<Vec<_>>();
+            vstack([
+                hstack([
+                    link(
+                        &format!("/virtual-directories/{}", directory.id),
+                        &directory.name,
+                    )
+                    .grow(1)
                     .color("#0f6175")
-                    .text_align("left"),
-                text(media_kind(entry)).width(90),
-                text(&entry.size).width(100),
-                text(&entry.modified).width(150),
+                    .cursor("pointer"),
+                    text(&format!("{} files", entries.len())).color("#6b7280"),
+                ])
+                .padding_bottom(5),
+                if entries.is_empty() {
+                    text("No files linked yet.").color("#6b7280").padding(8)
+                } else {
+                    vstack(entries).spacing(4)
+                },
             ])
-            .padding(5)
-            .border("1px solid #edf1f2")
-            .background_color("#ffffff")
-        });
-
-        vstack([
-            hstack([
-                text("").width(26),
-                media_sort_button(
-                    "Name",
-                    MEDIA_SORT_NAME_ID,
-                    self.media_sort_key == MediaSortKey::Name,
-                    self.media_sort_descending,
-                )
-                .grow(1),
-                media_sort_button(
-                    "Type",
-                    MEDIA_SORT_TYPE_ID,
-                    self.media_sort_key == MediaSortKey::Type,
-                    self.media_sort_descending,
-                )
-                .width(90),
-                media_sort_button(
-                    "Size",
-                    MEDIA_SORT_SIZE_ID,
-                    self.media_sort_key == MediaSortKey::Size,
-                    self.media_sort_descending,
-                )
-                .width(100),
-                media_sort_button(
-                    "Modified",
-                    MEDIA_SORT_MODIFIED_ID,
-                    self.media_sort_key == MediaSortKey::Modified,
-                    self.media_sort_descending,
-                )
-                .width(150),
-            ])
-            .padding(2)
+            .spacing(5)
+            .padding(12)
+            .border("1px solid #dce5e8")
             .background_color("#f8fafb")
-            .color("#6b7280"),
-            vstack(rows).grow(1).overflow("auto"),
-        ])
+        });
+        let content = if self.virtual_directories.is_empty() {
+            vstack([
+                text("No virtual directories yet.").color("#374151"),
+                text("Open an indexed file and choose “Virtual directory” to create one and add the file.")
+                    .color("#6b7280"),
+            ])
+            .spacing(4)
+            .padding(24)
+            .background_color("#f8fafb")
+        } else {
+            vstack(directories).spacing(12)
+        };
+
+        card(vstack([
+            hstack([
+                vstack([
+                    text("Virtual directories").color("#1f2937"),
+                    text("Collections of indexed file entries. Adding or forgetting a scanned folder never changes your files.")
+                        .color("#6b7280"),
+                ])
+                .grow(1)
+                .spacing(3),
+                button("＋ New virtual directory")
+                    .id(SHOW_CREATE_VIRTUAL_DIRECTORY_ID)
+                    .padding(7)
+                    .border("1px solid #0f7892")
+                    .background_color("#0f7892")
+                    .color("#ffffff"),
+            ])
+            .spacing(10)
+            .padding_bottom(10),
+            content,
+        ]))
         .grow(1)
-        .overflow("hidden")
+        .padding(14)
+        .overflow("auto")
+    }
+
+    fn virtual_directory_detail_panel(&self, directory: &VirtualDirectory) -> Item {
+        let entries = self.virtual_listing_entries(directory.id);
+        let entry_count = entries.len();
+        let content = if entries.is_empty() {
+            vstack([
+                text("This virtual directory is empty.").color("#374151"),
+                text("Open an indexed file and choose “Virtual directory” to add it here.")
+                    .color("#6b7280"),
+            ])
+            .spacing(4)
+            .padding(24)
+            .background_color("#f8fafb")
+        } else {
+            self.file_listing(
+                &entries,
+                &self.virtual_directory_view_mode,
+                self.media_thumbnail_size.clamp(140, 320) as u32,
+                VIRTUAL_FILE_VIEW_ID,
+                0..entries.len(),
+                None,
+            )
+        };
+        card(vstack([
+            hstack([
+                link("/virtual-directories", "←  Virtual directories")
+                    .color("#0f6175")
+                    .cursor("pointer"),
+                text(&directory.name).grow(1).color("#1f2937"),
+                select([option("table", "Table"), option("thumbnails", "Thumbnails")])
+                    .id(VIRTUAL_DIRECTORY_VIEW_MODE_ID)
+                    .svalue(&self.virtual_directory_view_mode)
+                    .width(130)
+                    .padding(7)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+                text(&format!("{entry_count} files")).color("#6b7280"),
+            ])
+            .spacing(10)
+            .padding_bottom(10),
+            content,
+        ]))
+        .grow(1)
+        .padding(14)
+        .overflow("auto")
     }
 
     fn transfers_panel(&self) -> Item {
@@ -2092,24 +2946,7 @@ impl App {
 
     fn media_folders_settings(&self) -> Item {
         let rows = self.media_paths.iter().map(|path| {
-            let status = if !Path::new(&path.path).is_dir() {
-                "Folder is unavailable".to_owned()
-            } else if !path.enabled {
-                "Media indexing paused".to_owned()
-            } else if let Some(status) = self.index_status.get(&path.id) {
-                if status.scanning {
-                    format!(
-                        "Scanning • {} folders • {} media files",
-                        status.directories_scanned, status.media_files_indexed
-                    )
-                } else if let Some(message) = &status.message {
-                    format!("Indexing error • {message}")
-                } else {
-                    "Media indexing active".to_owned()
-                }
-            } else {
-                "Media indexing active".to_owned()
-            };
+            let status = self.scan_status_text(path);
             hstack([
                 checkbox()
                     .id(TOGGLE_MEDIA_PATH_ID)
@@ -2122,6 +2959,19 @@ impl App {
                 ])
                 .grow(1)
                 .spacing(2),
+                button("Scan")
+                    .id(START_MEDIA_SCAN_ID)
+                    .inx(path.id)
+                    .padding(6)
+                    .border("1px solid #0f7892")
+                    .background_color("#ffffff")
+                    .color("#0f6175"),
+                link(&format!("/scanned-folders/{}", path.id), "Info")
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff")
+                    .color("#0f6175")
+                    .cursor("pointer"),
                 button("Forget")
                     .id(REMOVE_MEDIA_PATH_ID)
                     .inx(path.id)
@@ -2137,6 +2987,19 @@ impl App {
         let mut body = vec![
             text("PuppyDrive only reads and indexes these folders. Forgetting a folder only removes it from PuppyDrive; it never deletes the folder or its files.")
                 .color("#6b7280"),
+            text("Skip directories (comma-separated)").color("#4b5563"),
+            text_input()
+                .id(SCAN_IGNORED_DIRECTORIES_INPUT_ID)
+                .svalue(&self.scan_ignored_directories)
+                .placeholder("node_modules, .git, target"),
+            hstack([
+                text("Maximum file size (MB, 0 = unlimited)").grow(1).color("#4b5563"),
+                text_input()
+                    .id(SCAN_MAX_FILE_SIZE_INPUT_ID)
+                    .svalue(&self.scan_max_file_size_mb)
+                    .width(110),
+            ])
+            .spacing(8),
             hstack([
                 text_input()
                     .id(ADD_MEDIA_PATH_INPUT_ID)
@@ -2168,14 +3031,182 @@ impl App {
         settings_section("Scanned folders", body)
     }
 
-    fn files_panel(&self) -> Item {
-        if self.viewing_this_computer {
-            return self.local_files_panel();
-        }
-
-        files_panel()
+    fn scanned_folder_detail_panel(&self) -> Item {
+        let Some(folder) = self
+            .selected_scanned_folder_id
+            .and_then(|id| self.media_paths.iter().find(|folder| folder.id == id))
+        else {
+            return card(
+                vstack([
+                    text("Scanned folder not found").color("#374151"),
+                    link("/settings", "Back to Settings")
+                        .color("#0f6175")
+                        .cursor("pointer"),
+                ])
+                .spacing(8)
+                .padding(18),
+            )
+            .grow(1)
+            .padding(14);
+        };
+        let history = if self.selected_scanned_folder_history.is_empty() {
+            vstack([
+                text("No scans recorded yet.").color("#374151"),
+                text("Completed scans, including automatic rescans, will appear here.")
+                    .color("#6b7280"),
+            ])
+            .spacing(4)
+            .padding(18)
+            .background_color("#f8fafb")
+        } else {
+            let header = hstack([
+                text("Started").width(125).color("#6b7280"),
+                text("Trigger").width(125).color("#6b7280"),
+                text("Result").width(95).color("#6b7280"),
+                text("Duration").width(90).color("#6b7280"),
+                text("Folders").width(70).color("#6b7280"),
+                text("Files").width(70).color("#6b7280"),
+                text("Details").grow(1).color("#6b7280"),
+            ])
+            .spacing(8)
+            .padding(8)
+            .background_color("#f8fafb");
+            let rows = self.selected_scanned_folder_history.iter().map(|entry| {
+                let (result, result_color) = scan_outcome_label(entry.outcome);
+                let started = system_time_from_millis(entry.started_at)
+                    .map_or_else(|| "—".to_owned(), format_modified);
+                let detail = entry.error_message.as_deref().unwrap_or("—");
+                hstack([
+                    text(&started).width(125).color("#374151"),
+                    text(scan_trigger_label(entry.trigger))
+                        .width(125)
+                        .color("#374151"),
+                    text(result).width(95).color(result_color),
+                    text(&format_scan_duration(entry.finished_at - entry.started_at))
+                        .width(90)
+                        .color("#374151"),
+                    text(&entry.directories_scanned.to_string())
+                        .width(70)
+                        .color("#374151"),
+                    text(&entry.files_indexed.to_string())
+                        .width(70)
+                        .color("#374151"),
+                    text(detail).grow(1).break_words(true).color("#6b7280"),
+                ])
+                .spacing(8)
+                .padding(8)
+                .border("1px solid #e4ebed")
+                .background_color("#ffffff")
+            });
+            vstack([header, vstack(rows).spacing(2)]).spacing(2)
+        };
+        card(
+            vstack([
+                hstack([
+                    vstack([
+                        text("Scanned folder").color("#1f2937"),
+                        text(&folder.path).color("#6b7280").break_words(true),
+                        text(&self.scan_status_text(folder)).color("#6b7280"),
+                    ])
+                    .grow(1)
+                    .spacing(3),
+                    button("Scan")
+                        .id(START_MEDIA_SCAN_ID)
+                        .inx(folder.id)
+                        .padding(7)
+                        .border("1px solid #0f7892")
+                        .background_color("#ffffff")
+                        .color("#0f6175"),
+                    link("/settings", "Back to Settings")
+                        .padding(7)
+                        .border("1px solid #dce5e8")
+                        .background_color("#ffffff")
+                        .color("#0f6175")
+                        .cursor("pointer"),
+                ])
+                .spacing(10)
+                .padding_bottom(14),
+                text("Scan history").color("#1f2937").padding_bottom(6),
+                history,
+            ])
+            .spacing(4),
+        )
+        .grow(1)
+        .padding(14)
+        .overflow("auto")
     }
 
+    fn files_panel(&self) -> Item {
+        let entries = self.filtered_file_entries();
+        let mut scanned_folder_options = vec![option("all", "All scanned folders")];
+        scanned_folder_options.extend(self.media_paths.iter().map(|folder| {
+            let id = folder.id.to_string();
+            option(&id, &folder.path)
+        }));
+        let file_content = self.file_listing(
+            &entries,
+            &self.files_view_mode,
+            self.media_thumbnail_size.clamp(140, 320) as u32,
+            INDEXED_FILE_VIEW_ID,
+            0..entries.len(),
+            None,
+        );
+        card(vstack([
+            hstack([
+                vstack([
+                    text("Files").color("#1f2937"),
+                    text(&format!("{} indexed files", entries.len())).color("#6b7280"),
+                ])
+                .grow(1)
+                .spacing(3),
+                select(scanned_folder_options)
+                    .id(FILES_SCANNED_FOLDER_FILTER_ID)
+                    .svalue(&self.files_scanned_folder_filter)
+                    .width(170)
+                    .padding(7)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+                select([
+                    option("all", "All types"),
+                    option("images", "Images"),
+                    option("videos", "Videos"),
+                    option("other", "Other"),
+                ])
+                .id(FILES_MIME_FILTER_ID)
+                .svalue(&self.files_mime_filter)
+                .width(120)
+                .padding(7)
+                .border("1px solid #dce5e8")
+                .background_color("#ffffff"),
+                select([
+                    option("modified", "Modified"),
+                    option("name", "Name"),
+                    option("size", "Size"),
+                ])
+                .id(FILES_SORT_ID)
+                .svalue(&self.files_sort)
+                .width(110)
+                .padding(7)
+                .border("1px solid #dce5e8")
+                .background_color("#ffffff"),
+                select([option("table", "Table"), option("thumbnails", "Thumbnails")])
+                    .id(FILES_VIEW_MODE_ID)
+                    .svalue(&self.files_view_mode)
+                    .width(130)
+                    .padding(7)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ])
+            .spacing(8)
+            .padding_bottom(10),
+            file_content,
+        ]))
+        .grow(1)
+        .padding(14)
+        .overflow("hidden")
+    }
+
+    #[allow(dead_code)]
     fn local_files_panel(&self) -> Item {
         let at_root = self.this_computer_path == self.this_computer_root;
         let relative_path = self
@@ -2259,6 +3290,16 @@ impl App {
                 vstack([text("File viewer"), text(name).color("#6b7280")])
                     .grow(1)
                     .spacing(2),
+                if self.selected_file_hash.is_some() {
+                    button("＋ Virtual directory")
+                        .id(SHOW_VIRTUAL_DIRECTORY_PICKER_ID)
+                        .padding(6)
+                        .border("1px solid #dce5e8")
+                        .background_color("#ffffff")
+                        .color("#0f6175")
+                } else {
+                    vstack(Vec::<Item>::new())
+                },
                 button("←")
                     .id(PREVIOUS_FILE_VIEWER_ID)
                     .width(40)
@@ -2281,16 +3322,12 @@ impl App {
                     .border("1px solid #dce5e8")
                     .background_color(if can_go_next { "#ffffff" } else { "#f3f4f6" })
                     .color(if can_go_next { "#0f6175" } else { "#9ca3af" }),
-                button(if expanded {
-                    "↙  Restore"
-                } else {
-                    "⛶  Maximize"
-                })
-                .id(TOGGLE_FILE_VIEWER_SIZE_ID)
-                .width(112)
-                .padding(6)
-                .border("1px solid #dce5e8")
-                .background_color("#ffffff"),
+                button(if expanded { "↙" } else { "⛶" })
+                    .id(TOGGLE_FILE_VIEWER_SIZE_ID)
+                    .width(40)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
                 button("×")
                     .id(CLOSE_FILE_VIEWER_ID)
                     .width(40)
@@ -2522,10 +3559,15 @@ impl App {
             .spacing(8),
             if folders.is_empty() {
                 vstack([text("No readable subfolders.").color("#6b7280")])
-                    .grow(1)
+                    .height(340)
                     .padding(10)
             } else {
-                vstack(folder_rows).grow(1).overflow("auto")
+                vstack(folder_rows).height(340).overflow("auto")
+            },
+            if let Some(error) = &self.media_path_error {
+                text(error).color("#b42318")
+            } else {
+                vstack(Vec::<Item>::new())
             },
             hstack([
                 button("Cancel")
@@ -2546,6 +3588,119 @@ impl App {
         .height(560)
         .spacing(10)
         .padding(14)])
+    }
+
+    fn virtual_directory_picker_modal(&self) -> Item {
+        let directory_rows = self.virtual_directories.iter().map(|directory| {
+            button(&directory.name)
+                .id(ADD_TO_VIRTUAL_DIRECTORY_ID)
+                .inx(directory.id)
+                .padding(8)
+                .border("1px solid #e4ebed")
+                .background_color("#ffffff")
+                .color("#0f6175")
+                .text_align("left")
+        });
+        let mut content = vec![
+            hstack([
+                vstack([
+                    text("Add to virtual directory"),
+                    text("This creates a database link to the indexed file; it never moves or copies the file.")
+                        .color("#6b7280"),
+                ])
+                .grow(1)
+                .spacing(2),
+                button("×")
+                    .id(CLOSE_VIRTUAL_DIRECTORY_PICKER_ID)
+                    .width(40)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ]),
+        ];
+        if self.virtual_directories.is_empty() {
+            content.push(text("Create the first virtual directory below.").color("#6b7280"));
+        } else {
+            content.push(text("Choose an existing directory").color("#4b5563"));
+            content.push(
+                vstack(directory_rows)
+                    .spacing(5)
+                    .max_height(220)
+                    .overflow("auto"),
+            );
+        }
+        content.push(text("New virtual directory").color("#4b5563"));
+        content.push(
+            hstack([
+                text_input()
+                    .id(VIRTUAL_DIRECTORY_NAME_INPUT_ID)
+                    .svalue(&self.new_virtual_directory_name)
+                    .placeholder("e.g. Favourites")
+                    .grow(1),
+                button("Create and add")
+                    .id(CREATE_VIRTUAL_DIRECTORY_ID)
+                    .padding(7)
+                    .border("1px solid #0f7892")
+                    .background_color("#0f7892")
+                    .color("#ffffff"),
+            ])
+            .spacing(8),
+        );
+        if let Some(error) = &self.virtual_directory_error {
+            content.push(text(error).color("#b42318"));
+        }
+        content.push(
+            button("Cancel")
+                .id(CLOSE_VIRTUAL_DIRECTORY_PICKER_ID)
+                .padding(7)
+                .border("1px solid #dce5e8")
+                .background_color("#ffffff"),
+        );
+        modal([card(vstack(content)).width(500).spacing(10).padding(14)])
+    }
+
+    fn create_virtual_directory_modal(&self) -> Item {
+        let mut content = vec![
+            hstack([
+                vstack([
+                    text("New virtual directory"),
+                    text("Create an empty collection, then add indexed files from their viewer.")
+                        .color("#6b7280"),
+                ])
+                .grow(1)
+                .spacing(2),
+                button("×")
+                    .id(CLOSE_CREATE_VIRTUAL_DIRECTORY_ID)
+                    .width(40)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+            ]),
+            text_input()
+                .id(VIRTUAL_DIRECTORY_NAME_INPUT_ID)
+                .svalue(&self.new_virtual_directory_name)
+                .placeholder("e.g. Favourites"),
+        ];
+        if let Some(error) = &self.virtual_directory_error {
+            content.push(text(error).color("#b42318"));
+        }
+        content.push(
+            hstack([
+                button("Cancel")
+                    .id(CLOSE_CREATE_VIRTUAL_DIRECTORY_ID)
+                    .padding(7)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+                button("Create")
+                    .id(SAVE_CREATE_VIRTUAL_DIRECTORY_ID)
+                    .padding(7)
+                    .border("1px solid #0f7892")
+                    .background_color("#0f7892")
+                    .color("#ffffff"),
+            ])
+            .spacing(8),
+        );
+        modal([card(vstack(content)).width(440).spacing(10).padding(14)])
     }
 
     fn add_source_modal(&self) -> Item {
@@ -2592,6 +3747,7 @@ impl App {
     }
 }
 
+#[allow(dead_code)]
 fn files_panel() -> Item {
     card(vstack([
         hstack([
@@ -2659,6 +3815,7 @@ fn files_panel() -> Item {
     .padding(6)
 }
 
+#[allow(dead_code)]
 fn breadcrumbs<'a>(parts: impl IntoIterator<Item = &'a str>) -> Item {
     let parts = parts.into_iter().collect::<Vec<_>>();
     let mut items = Vec::with_capacity(parts.len().saturating_mul(2));
@@ -2673,6 +3830,7 @@ fn breadcrumbs<'a>(parts: impl IntoIterator<Item = &'a str>) -> Item {
     hstack(items).spacing(5)
 }
 
+#[allow(dead_code)]
 fn local_breadcrumbs(parts: &[String]) -> Item {
     let mut items = Vec::with_capacity(parts.len().saturating_mul(2));
 
@@ -2698,6 +3856,7 @@ fn local_breadcrumbs(parts: &[String]) -> Item {
     hstack(items).spacing(5)
 }
 
+#[allow(dead_code)]
 fn local_tree_row(
     node: &TreeNode,
     index: u32,
@@ -3119,6 +4278,84 @@ fn media_source_url(root: &MediaScanPath, path: &Path) -> Option<String> {
     })
 }
 
+const THUMBNAIL_MAX_DIMENSION: u32 = 512;
+
+fn media_thumbnail_url(entry: &FileListingEntry) -> Option<String> {
+    let folder_id = entry.media_root_id?;
+    let hash = entry.hash.as_deref()?;
+    Some(format!(
+        "/media-thumbnails/{folder_id}/{}",
+        hex_encode(hash)
+    ))
+}
+
+fn media_thumbnail_response(
+    request: &str,
+    database_path: &Path,
+    node_id: &[u8],
+    folders: &HashMap<u32, ManagedFolder>,
+    cache_dir: &Path,
+) -> Option<HttpResponse> {
+    let (folder_id, hash) = parse_thumbnail_request(request)?;
+    let database = Database::open(database_path).ok()?;
+    let source_path = database
+        .media_thumbnail_source(node_id, folder_id, &hash)
+        .ok()??;
+    let folder = folders.get(&folder_id)?;
+    let source_path = folder.canonicalize(&source_path).ok()?;
+    let cache_path = cache_dir.join(format!(
+        "{}-{THUMBNAIL_MAX_DIMENSION}.png",
+        hex_encode(&hash)
+    ));
+    if let Ok(bytes) = fs::read(&cache_path) {
+        return Some(
+            HttpResponse::new(200, bytes)
+                .header("content-type", "image/png")
+                .header("cache-control", "public, max-age=31536000, immutable"),
+        );
+    }
+
+    let source_bytes = folder.read(&source_path, None).ok()?;
+    let image = image::load_from_memory(&source_bytes).ok()?;
+    let thumbnail = image.thumbnail(THUMBNAIL_MAX_DIMENSION, THUMBNAIL_MAX_DIMENSION);
+    let mut bytes = Vec::new();
+    thumbnail
+        .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .ok()?;
+    if fs::create_dir_all(cache_dir).is_err() {
+        return None;
+    }
+    let temporary = cache_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    if fs::write(&temporary, &bytes).is_ok() {
+        if fs::rename(&temporary, &cache_path).is_err() && !cache_path.exists() {
+            let _ = fs::remove_file(&temporary);
+            return None;
+        }
+    }
+    Some(
+        HttpResponse::new(200, bytes)
+            .header("content-type", "image/png")
+            .header("cache-control", "public, max-age=31536000, immutable"),
+    )
+}
+
+fn parse_thumbnail_request(request: &str) -> Option<(u32, Vec<u8>)> {
+    let (folder_id, hash) = request.split_once('/')?;
+    let folder_id = folder_id.parse().ok()?;
+    if hash.len() != 64 || hash.contains('/') {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(32);
+    for offset in (0..hash.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&hash[offset..offset + 2], 16).ok()?);
+    }
+    Some((folder_id, bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn build_media_watcher(
     roots: &[MediaScanPath],
     debounce: Duration,
@@ -3241,6 +4478,48 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn replica_label(count: usize) -> String {
+    if count == 1 {
+        "1 replica".to_owned()
+    } else {
+        format!("{count} replicas")
+    }
+}
+
+fn display_file_name(path: &str) -> String {
+    Path::new(path).file_name().map_or_else(
+        || path.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+fn scan_trigger_label(trigger: ScanTrigger) -> &'static str {
+    match trigger {
+        ScanTrigger::ManualFolder => "Manual folder scan",
+        ScanTrigger::ManualRefresh => "Manual refresh",
+        ScanTrigger::FilesystemChange => "Filesystem change",
+    }
+}
+
+fn scan_outcome_label(outcome: ScanOutcome) -> (&'static str, &'static str) {
+    match outcome {
+        ScanOutcome::Completed => ("Completed", "#16794b"),
+        ScanOutcome::Incomplete => ("Incomplete", "#b54708"),
+        ScanOutcome::Failed => ("Failed", "#b42318"),
+    }
+}
+
+fn format_scan_duration(millis: i64) -> String {
+    let millis = millis.max(0) as u64;
+    if millis < 1_000 {
+        format!("{millis} ms")
+    } else if millis < 60_000 {
+        format!("{:.1} s", millis as f64 / 1_000.0)
+    } else {
+        format!("{}m {}s", millis / 60_000, (millis / 1_000) % 60)
+    }
+}
+
 fn format_modified(time: SystemTime) -> String {
     let Ok(elapsed) = SystemTime::now().duration_since(time) else {
         return "Just now".to_owned();
@@ -3268,6 +4547,7 @@ fn relative_age(value: u64, unit: &str) -> String {
     format!("{value} {unit}{} ago", if value == 1 { "" } else { "s" })
 }
 
+#[allow(dead_code)]
 fn file_row(
     icon: &str,
     name: &str,
@@ -3357,6 +4637,61 @@ mod tests {
         assert!(scan_media_entries(&roots, &folders, 1, 10).truncated);
         let _ = fs::remove_dir_all(first);
         let _ = fs::remove_dir_all(second);
+    }
+
+    #[tokio::test]
+    async fn media_thumbnails_are_cached_by_file_hash() {
+        let directory = temporary_directory("thumbnail-cache");
+        let source_path = directory.join("large.png");
+        image::RgbaImage::from_pixel(1_200, 800, image::Rgba([20, 120, 180, 255]))
+            .save(&source_path)
+            .unwrap();
+        let database_path = directory.join("puppydrive.db");
+        let database = Database::open(&database_path).unwrap();
+        let folder = database
+            .save_scanned_folder(MediaScanPath {
+                id: 0,
+                path: directory.to_string_lossy().into_owned(),
+                enabled: true,
+                indexers: r#"["media"]"#.to_owned(),
+            })
+            .await
+            .unwrap();
+        let node_id = database.local_node_id("PuppyDrive").unwrap();
+        let hash = vec![9; 32];
+        database
+            .sync_media_scan(
+                &node_id,
+                folder.id,
+                &[MediaIndexObservation {
+                    path: source_path.clone(),
+                    hash: Some(hash.clone()),
+                    size: fs::metadata(&source_path).unwrap().len(),
+                    mime_type: Some("image/png".to_owned()),
+                    created_at: None,
+                    modified_at: None,
+                    accessed_at: None,
+                }],
+                true,
+            )
+            .unwrap();
+        let managed = ManagedFolder::open(folder.id, &folder.path).unwrap();
+        let folders = HashMap::from([(folder.id, managed)]);
+        let cache_dir = directory.join("thumbnails");
+        let request = format!("{}/{}", folder.id, hex_encode(&hash));
+        assert!(
+            media_thumbnail_response(&request, &database_path, &node_id, &folders, &cache_dir,)
+                .is_some()
+        );
+        let cache_path = cache_dir.join(format!(
+            "{}-{THUMBNAIL_MAX_DIMENSION}.png",
+            hex_encode(&hash)
+        ));
+        let thumbnail = image::open(&cache_path).unwrap();
+        assert!(thumbnail.width() <= THUMBNAIL_MAX_DIMENSION);
+        assert!(thumbnail.height() <= THUMBNAIL_MAX_DIMENSION);
+        drop(database);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

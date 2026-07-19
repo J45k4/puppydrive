@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 blake3 = "1"
 directories = "6"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 log = "0.4"
 notify = "8"
 percent-encoding = "2"

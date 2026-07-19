@@ -30,6 +30,68 @@ impl ScannedFolder {
 /// Compatibility alias while the UI transitions from the old Media-folder wording.
 pub type MediaScanPath = ScannedFolder;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanTrigger {
+    ManualFolder,
+    ManualRefresh,
+    FilesystemChange,
+}
+
+impl ScanTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ManualFolder => "manual-folder",
+            Self::ManualRefresh => "manual-refresh",
+            Self::FilesystemChange => "filesystem-change",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "manual-folder" => Self::ManualFolder,
+            "manual-refresh" => Self::ManualRefresh,
+            _ => Self::FilesystemChange,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanOutcome {
+    Completed,
+    Incomplete,
+    Failed,
+}
+
+impl ScanOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Incomplete => "incomplete",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "completed" => Self::Completed,
+            "incomplete" => Self::Incomplete,
+            _ => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanHistoryEntry {
+    pub scanned_folder_id: u32,
+    pub trigger: ScanTrigger,
+    pub outcome: ScanOutcome,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub directories_scanned: usize,
+    pub files_indexed: usize,
+    pub error_message: Option<String>,
+}
+
 impl HasId for ScannedFolder {
     fn id(&self) -> u32 {
         self.id
@@ -163,6 +225,53 @@ impl Database {
         self.delete_scanned_folder(id)
     }
 
+    pub fn scanned_folder_scan_history(&self, folder_id: u32) -> Result<Vec<ScanHistoryEntry>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, scanned_folder_id, trigger, outcome, started_at, finished_at,
+                    directories_scanned, files_indexed, error_message
+             FROM scanned_folder_scans
+             WHERE scanned_folder_id = ?1
+             ORDER BY finished_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([folder_id], scan_history_entry_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn save_scanned_folder_scan(&self, entry: ScanHistoryEntry) -> Result<ScanHistoryEntry> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO scanned_folder_scans
+                (scanned_folder_id, trigger, outcome, started_at, finished_at,
+                 directories_scanned, files_indexed, error_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.scanned_folder_id,
+                entry.trigger.as_str(),
+                entry.outcome.as_str(),
+                entry.started_at,
+                entry.finished_at,
+                entry.directories_scanned as i64,
+                entry.files_indexed as i64,
+                entry.error_message,
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM scanned_folder_scans
+             WHERE scanned_folder_id = ?1 AND id IN (
+                 SELECT id FROM scanned_folder_scans
+                 WHERE scanned_folder_id = ?1
+                 ORDER BY finished_at DESC, id DESC
+                 LIMIT -1 OFFSET 100
+             )",
+            [entry.scanned_folder_id],
+        )?;
+        transaction.commit()?;
+        Ok(entry)
+    }
+
     pub fn local_node_id(&self, name: &str) -> Result<Vec<u8>> {
         let connection = self.connection()?;
         let existing = connection
@@ -184,15 +293,31 @@ impl Database {
     pub fn cached_media(&self, node_id: &[u8]) -> Result<Vec<IndexedMediaFile>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT location.path, location.size, location.mime_type, location.modified_at,
-                    MIN(membership.scanned_folder_id)
-             FROM file_locations location
-             JOIN scanned_folder_locations membership
-               ON membership.node_id = location.node_id AND membership.path = location.path
-             JOIN ScannedFolder folder ON folder.id = membership.scanned_folder_id
-             WHERE location.node_id = ?1 AND folder.enabled = 1 AND membership.indexer = 'media'
-             GROUP BY location.node_id, location.path
-             ORDER BY lower(location.path)",
+            "WITH media_locations AS (
+                 SELECT location.path, location.size, location.mime_type, location.modified_at,
+                        MIN(membership.scanned_folder_id) AS scanned_folder_id, location.hash
+                 FROM file_locations location
+                 JOIN scanned_folder_locations membership
+                   ON membership.node_id = location.node_id AND membership.path = location.path
+                 JOIN ScannedFolder folder ON folder.id = membership.scanned_folder_id
+                 WHERE location.node_id = ?1 AND folder.enabled = 1 AND membership.indexer = 'media'
+                   AND (location.mime_type LIKE 'image/%' OR location.mime_type LIKE 'video/%')
+                 GROUP BY location.node_id, location.path
+             ), media_representatives AS (
+                 SELECT candidate.*,
+                        CASE WHEN candidate.hash IS NULL THEN 1 ELSE (
+                            SELECT COUNT(*) FROM media_locations replica
+                            WHERE replica.hash = candidate.hash
+                        ) END AS replica_count
+                 FROM media_locations candidate
+                 WHERE candidate.hash IS NULL OR candidate.path = (
+                     SELECT MIN(replica.path) FROM media_locations replica
+                     WHERE replica.hash = candidate.hash
+                 )
+             )
+             SELECT path, size, mime_type, modified_at, scanned_folder_id, hash, replica_count
+             FROM media_representatives
+             ORDER BY lower(path)",
         )?;
         let rows = statement.query_map([node_id], |row| {
             Ok(IndexedMediaFile {
@@ -201,6 +326,152 @@ impl Database {
                 mime_type: row.get(2)?,
                 modified_at: row.get(3)?,
                 scanned_folder_id: row.get::<_, i64>(4)? as u32,
+                hash: row.get(5)?,
+                replica_count: row.get::<_, i64>(6)? as usize,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn cached_files(&self, node_id: &[u8]) -> Result<Vec<IndexedFile>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT location.path, location.size, location.mime_type, location.modified_at,
+                    location.hash,
+                    (SELECT MIN(membership.scanned_folder_id) FROM scanned_folder_locations membership
+                     WHERE membership.node_id = location.node_id AND membership.path = location.path),
+                    (SELECT COUNT(*) FROM file_locations replica WHERE replica.hash = location.hash)
+             FROM file_locations location
+             WHERE location.node_id = ?1
+             ORDER BY lower(location.path)",
+        )?;
+        let rows = statement.query_map([node_id], |row| {
+            Ok(IndexedFile {
+                path: PathBuf::from(row.get::<_, String>(0)?),
+                size: row.get::<_, i64>(1)? as u64,
+                mime_type: row.get(2)?,
+                modified_at: row.get(3)?,
+                hash: row.get(4)?,
+                scanned_folder_id: row.get::<_, Option<i64>>(5)?.map(|id| id as u32),
+                replica_count: row.get::<_, i64>(6)? as usize,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn media_thumbnail_source(
+        &self,
+        node_id: &[u8],
+        folder_id: u32,
+        hash: &[u8],
+    ) -> Result<Option<PathBuf>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT location.path
+                 FROM file_locations location
+                 JOIN scanned_folder_locations membership
+                   ON membership.node_id = location.node_id AND membership.path = location.path
+                 JOIN ScannedFolder folder ON folder.id = membership.scanned_folder_id
+                 WHERE location.node_id = ?1 AND membership.scanned_folder_id = ?2
+                   AND membership.indexer = 'media' AND folder.enabled = 1 AND location.hash = ?3
+                   AND location.mime_type LIKE 'image/%'
+                 ORDER BY lower(location.path)
+                 LIMIT 1",
+                params![node_id, folder_id, hash],
+                |row| row.get::<_, String>(0).map(PathBuf::from),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn virtual_directories(&self) -> Result<Vec<VirtualDirectory>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT id, name FROM virtual_directories ORDER BY lower(name), id")?;
+        let rows = statement.query_map([], |row| {
+            Ok(VirtualDirectory {
+                id: row.get::<_, i64>(0)? as u32,
+                name: row.get(1)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn create_virtual_directory(&self, name: &str) -> Result<VirtualDirectory> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("virtual directory name cannot be empty");
+        }
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT INTO virtual_directories (name, created_at) VALUES (?1, ?2)",
+            params![name, now_millis()],
+        )?;
+        Ok(VirtualDirectory {
+            id: connection.last_insert_rowid() as u32,
+            name: name.to_owned(),
+        })
+    }
+
+    pub fn file_hash_for_location(&self, node_id: &[u8], path: &Path) -> Result<Option<Vec<u8>>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT hash FROM file_locations WHERE node_id = ?1 AND path = ?2 AND hash IS NOT NULL",
+                params![node_id, path.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn add_file_to_virtual_directory(&self, directory_id: u32, hash: &[u8]) -> Result<()> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO virtual_directory_entries
+                (virtual_directory_id, file_hash, added_at) VALUES (?1, ?2, ?3)",
+            params![directory_id, hash, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn virtual_directory_entries(&self, node_id: &[u8]) -> Result<Vec<VirtualDirectoryEntry>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT directory.id, entry.size, entry.mime_type, entry.hash,
+                    (SELECT location.path FROM file_locations location
+                     WHERE location.node_id = ?1 AND location.hash = entry.hash
+                     ORDER BY lower(location.path) LIMIT 1),
+                    (SELECT location.modified_at FROM file_locations location
+                     WHERE location.node_id = ?1 AND location.hash = entry.hash
+                     ORDER BY lower(location.path) LIMIT 1),
+                    (SELECT MIN(membership.scanned_folder_id) FROM scanned_folder_locations membership
+                     JOIN ScannedFolder folder ON folder.id = membership.scanned_folder_id
+                     WHERE membership.node_id = ?1 AND membership.path = (
+                         SELECT location.path FROM file_locations location
+                         WHERE location.node_id = ?1 AND location.hash = entry.hash
+                         ORDER BY lower(location.path) LIMIT 1
+                     ) AND membership.indexer = 'media' AND folder.enabled = 1),
+                    (SELECT COUNT(*) FROM file_locations replica WHERE replica.hash = entry.hash)
+             FROM virtual_directories directory
+             JOIN virtual_directory_entries link ON link.virtual_directory_id = directory.id
+             JOIN file_entries entry ON entry.hash = link.file_hash
+             ORDER BY lower(directory.name), link.added_at, entry.hash",
+        )?;
+        let rows = statement.query_map([node_id], |row| {
+            Ok(VirtualDirectoryEntry {
+                virtual_directory_id: row.get::<_, i64>(0)? as u32,
+                size: row.get::<_, i64>(1)? as u64,
+                mime_type: row.get(2)?,
+                hash: row.get(3)?,
+                path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                modified_at: row.get(5)?,
+                scanned_folder_id: row.get::<_, Option<i64>>(6)?.map(|id| id as u32),
+                replica_count: row.get::<_, i64>(7)? as usize,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -301,6 +572,37 @@ pub struct IndexedMediaFile {
     pub mime_type: Option<String>,
     pub modified_at: Option<i64>,
     pub scanned_folder_id: u32,
+    pub hash: Option<Vec<u8>>,
+    pub replica_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedFile {
+    pub path: PathBuf,
+    pub size: u64,
+    pub mime_type: Option<String>,
+    pub modified_at: Option<i64>,
+    pub hash: Option<Vec<u8>>,
+    pub scanned_folder_id: Option<u32>,
+    pub replica_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtualDirectory {
+    pub id: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtualDirectoryEntry {
+    pub virtual_directory_id: u32,
+    pub size: u64,
+    pub mime_type: Option<String>,
+    pub hash: Vec<u8>,
+    pub path: Option<PathBuf>,
+    pub modified_at: Option<i64>,
+    pub scanned_folder_id: Option<u32>,
+    pub replica_count: usize,
 }
 
 fn now_millis() -> i64 {
@@ -309,6 +611,19 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+fn scan_history_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanHistoryEntry> {
+    Ok(ScanHistoryEntry {
+        scanned_folder_id: row.get::<_, i64>(1)? as u32,
+        trigger: ScanTrigger::from_str(&row.get::<_, String>(2)?),
+        outcome: ScanOutcome::from_str(&row.get::<_, String>(3)?),
+        started_at: row.get(4)?,
+        finished_at: row.get(5)?,
+        directories_scanned: row.get::<_, i64>(6)? as usize,
+        files_indexed: row.get::<_, i64>(7)? as usize,
+        error_message: row.get(8)?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +704,46 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn scanned_folder_history_is_newest_first_and_keeps_last_hundred() {
+        let path = temporary_database("scan-history");
+        let db = Database::open(&path).unwrap();
+        let folder = db
+            .save_scanned_folder(ScannedFolder {
+                id: 0,
+                path: "/photos".to_owned(),
+                enabled: true,
+                indexers: r#"["media"]"#.to_owned(),
+            })
+            .await
+            .unwrap();
+        for finished_at in 0..101 {
+            db.save_scanned_folder_scan(ScanHistoryEntry {
+                scanned_folder_id: folder.id,
+                trigger: ScanTrigger::ManualFolder,
+                outcome: ScanOutcome::Completed,
+                started_at: finished_at - 1,
+                finished_at,
+                directories_scanned: 1,
+                files_indexed: 2,
+                error_message: None,
+            })
+            .unwrap();
+        }
+        let history = db.scanned_folder_scan_history(folder.id).unwrap();
+        assert_eq!(history.len(), 100);
+        assert_eq!(history.first().unwrap().finished_at, 100);
+        assert_eq!(history.last().unwrap().finished_at, 1);
+        assert!(db.delete_scanned_folder(folder.id).unwrap());
+        assert!(
+            db.scanned_folder_scan_history(folder.id)
+                .unwrap()
+                .is_empty()
+        );
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn typed_local_config_rejects_secrets_and_relative_paths() {
         assert!(validate_source_config("local", 1, r#"{"path":"/archive"}"#).is_ok());
@@ -443,7 +798,9 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(db.cached_media(&node_id).unwrap().len(), 2);
+        let media = db.cached_media(&node_id).unwrap();
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].replica_count, 2);
 
         assert!(db.delete_scanned_folder(first.id).unwrap());
         assert_eq!(db.cached_media(&node_id).unwrap().len(), 1);
@@ -471,6 +828,51 @@ mod tests {
             1
         );
         drop(connection);
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn virtual_directory_links_are_idempotent_and_survive_forgotten_locations() {
+        let path = temporary_database("virtual-directories");
+        let db = Database::open(&path).unwrap();
+        let node_id = db.local_node_id("PuppyDrive").unwrap();
+        let folder = db
+            .save_scanned_folder(ScannedFolder {
+                id: 0,
+                path: "/photos".to_owned(),
+                enabled: true,
+                indexers: r#"["media"]"#.to_owned(),
+            })
+            .await
+            .unwrap();
+        let hash = vec![9; 32];
+        db.sync_media_scan(
+            &node_id,
+            folder.id,
+            &[MediaIndexObservation {
+                path: PathBuf::from("/photos/a.jpg"),
+                hash: Some(hash.clone()),
+                size: 42,
+                mime_type: Some("image/jpeg".to_owned()),
+                created_at: None,
+                modified_at: Some(1),
+                accessed_at: None,
+            }],
+            true,
+        )
+        .unwrap();
+        let directory = db.create_virtual_directory("Favourites").unwrap();
+        db.add_file_to_virtual_directory(directory.id, &hash)
+            .unwrap();
+        db.add_file_to_virtual_directory(directory.id, &hash)
+            .unwrap();
+        assert_eq!(db.virtual_directory_entries(&node_id).unwrap().len(), 1);
+
+        assert!(db.delete_scanned_folder(folder.id).unwrap());
+        let entries = db.virtual_directory_entries(&node_id).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, None);
         drop(db);
         let _ = fs::remove_file(path);
     }

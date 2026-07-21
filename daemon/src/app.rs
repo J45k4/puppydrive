@@ -114,6 +114,9 @@ const CLOSE_NEW_FOLDER_ID: u32 = 110;
 const NEW_FOLDER_NAME_INPUT_ID: u32 = 111;
 const CREATE_NEW_FOLDER_ID: u32 = 112;
 const SHOW_PICKER_NEW_FOLDER_ID: u32 = 113;
+const AUDIO_PREVIOUS_PAGE_ID: u32 = 114;
+const AUDIO_NEXT_PAGE_ID: u32 = 115;
+const AUDIO_SCANNED_FOLDER_FILTER_ID: u32 = 116;
 const MAX_FILE_PREVIEW_BYTES: u64 = 1_048_576;
 const MAX_HEX_PREVIEW_BYTES: usize = 65_536;
 const MAX_UPLOAD_BYTES: usize = 1_073_741_824;
@@ -227,6 +230,8 @@ pub struct App {
     upload_asset: StaticAsset,
     media_entries: Vec<LocalEntry>,
     media_index_entries: Vec<IndexedMediaFile>,
+    audio_entries: Vec<LocalEntry>,
+    audio_index_entries: Vec<IndexedMediaFile>,
     indexed_files: Vec<IndexedFile>,
     filtered_files: Vec<FileListingEntry>,
     media_scan_truncated: bool,
@@ -266,6 +271,8 @@ pub struct App {
     media_sort_descending: bool,
     media_page: usize,
     media_scanned_folder_filter: String,
+    audio_page: usize,
+    audio_scanned_folder_filter: String,
     files_view_mode: String,
     files_mime_filter: String,
     files_scanned_folder_filter: String,
@@ -510,6 +517,7 @@ struct FolderContext {
 enum AppPage {
     Files,
     Media,
+    Audio,
     ScannedFolder,
     VirtualDirectories,
     Transfers,
@@ -692,6 +700,8 @@ impl App {
         expanded_local_dirs.insert(this_computer_root.clone());
         let cached_media =
             available_media_entries(database.cached_media(&local_node_id)?, &managed_folders);
+        let cached_audio =
+            available_media_entries(database.cached_audio(&local_node_id)?, &managed_folders);
         let indexed_files = database.cached_files(&local_node_id)?;
         let scan_ignored_directories = config.media.ignored_directory_names.join(", ");
         let scan_max_file_size_mb = config.media.max_file_size_mb.to_string();
@@ -726,6 +736,8 @@ impl App {
             upload_asset,
             media_entries: local_entries_from_index(cached_media.clone()),
             media_index_entries: cached_media,
+            audio_entries: local_entries_from_index(cached_audio.clone()),
+            audio_index_entries: cached_audio,
             indexed_files,
             filtered_files: Vec::new(),
             media_scan_truncated: false,
@@ -765,6 +777,8 @@ impl App {
             media_sort_descending: false,
             media_page: 0,
             media_scanned_folder_filter: "all".to_owned(),
+            audio_page: 0,
+            audio_scanned_folder_filter: "all".to_owned(),
             files_view_mode: "table".to_owned(),
             files_mime_filter: "all".to_owned(),
             files_scanned_folder_filter: "all".to_owned(),
@@ -824,6 +838,7 @@ impl App {
             .padding(6),
             nav_link("□  Files", "/", self.active_page == AppPage::Files),
             nav_link("▧  Media", "/media", self.active_page == AppPage::Media),
+            nav_link("♫  Audio", "/audio", self.active_page == AppPage::Audio),
             nav_link(
                 "◫  Virtual directories",
                 "/virtual-directories",
@@ -893,6 +908,7 @@ impl App {
         let workspace = match self.active_page {
             AppPage::Settings => self.settings_panel().grow(1).padding(6).overflow("auto"),
             AppPage::Media => self.media_panel().grow(1).padding(6).overflow("hidden"),
+            AppPage::Audio => self.audio_panel().grow(1).padding(6).overflow("hidden"),
             AppPage::ScannedFolder => self
                 .scanned_folder_detail_panel()
                 .grow(1)
@@ -910,6 +926,7 @@ impl App {
         let page_title = match self.active_page {
             AppPage::Files => "Files",
             AppPage::Media => "Media",
+            AppPage::Audio => "Audio",
             AppPage::ScannedFolder => "Scanned folder",
             AppPage::VirtualDirectories => "Virtual directories",
             AppPage::Transfers => "Transfers",
@@ -1017,6 +1034,7 @@ impl App {
                         .filter(|id| self.media_paths.iter().any(|folder| folder.id == *id));
                     self.active_page = match path {
                         "/media" => AppPage::Media,
+                        "/audio" => AppPage::Audio,
                         _ if scanned_folder_id.is_some() => {
                             self.selected_scanned_folder_id = scanned_folder_id;
                             self.refresh_selected_scanned_folder_history();
@@ -1072,6 +1090,10 @@ impl App {
                 ClientEvent::OnSelect(change) if change.id == MEDIA_SCANNED_FOLDER_FILTER_ID => {
                     self.media_scanned_folder_filter = change.value;
                     self.media_page = 0;
+                }
+                ClientEvent::OnSelect(change) if change.id == AUDIO_SCANNED_FOLDER_FILTER_ID => {
+                    self.audio_scanned_folder_filter = change.value;
+                    self.audio_page = 0;
                 }
                 ClientEvent::OnSelect(change) if change.id == VIRTUAL_DIRECTORY_VIEW_MODE_ID => {
                     self.virtual_directory_view_mode = change.value;
@@ -1190,14 +1212,19 @@ impl App {
                 }
                 ClientEvent::OnCustom(event) if event.id == LOCAL_MEDIA_VIEW_ID => {
                     if let Some(index) = custom_event_index(&event.payload) {
-                        self.open_media(index);
+                        if self.active_page == AppPage::Audio {
+                            self.open_audio(index);
+                        } else {
+                            self.open_media(index);
+                        }
                     }
                 }
                 ClientEvent::OnCustom(event) if event.id == MEDIA_TABLE_SORT_ID => {
-                    if self.active_page == AppPage::Media {
+                    if matches!(self.active_page, AppPage::Media | AppPage::Audio) {
                         if let Some(key) = media_sort_key_from_payload(&event.payload) {
                             self.toggle_media_sort(key);
                             self.media_page = 0;
+                            self.audio_page = 0;
                         }
                     }
                 }
@@ -1275,6 +1302,18 @@ impl App {
                             self.media_page += 1;
                         }
                     }
+                    AUDIO_PREVIOUS_PAGE_ID => {
+                        self.audio_page = self.audio_page.saturating_sub(1);
+                    }
+                    AUDIO_NEXT_PAGE_ID => {
+                        let page_count = self
+                            .filtered_audio_indices()
+                            .len()
+                            .div_ceil(FILES_PAGE_SIZE);
+                        if self.audio_page + 1 < page_count {
+                            self.audio_page += 1;
+                        }
+                    }
                     SHOW_VIRTUAL_DIRECTORY_PICKER_ID => {
                         if self.selected_file_hash.is_some() {
                             self.show_virtual_directory_picker = true;
@@ -1310,7 +1349,11 @@ impl App {
                     }
                     LOCAL_MEDIA_VIEW_ID => {
                         if let Some(index) = click.inx {
-                            self.open_media(index as usize);
+                            if self.active_page == AppPage::Audio {
+                                self.open_audio(index as usize);
+                            } else {
+                                self.open_media(index as usize);
+                            }
                         }
                     }
                     VIRTUAL_FILE_VIEW_ID => {
@@ -1679,6 +1722,29 @@ impl App {
         }
     }
 
+    fn open_audio(&mut self, index: usize) {
+        let Some(entry) = self.audio_entries.get(index).cloned() else {
+            return;
+        };
+        let entries = self
+            .filtered_audio_indices()
+            .into_iter()
+            .filter_map(|index| self.audio_entries.get(index).cloned())
+            .collect::<Vec<_>>();
+        let Some(viewer_index) = entries
+            .iter()
+            .position(|candidate| candidate.path == entry.path)
+        else {
+            return;
+        };
+        self.file_viewer_entries = FileViewerEntries::Local(entries);
+        self.file_viewer_index = None;
+        self.file_viewer_expanded = false;
+        if self.select_viewer_entry(&entry) {
+            self.file_viewer_index = Some(viewer_index);
+        }
+    }
+
     fn virtual_listing_entries(&self, directory_id: u32) -> Vec<FileListingEntry> {
         self.virtual_directory_entries
             .iter()
@@ -1747,6 +1813,42 @@ impl App {
                         .get(*index)
                         .and_then(|entry| entry.media_root_id)
                         .is_some_and(|id| id.to_string() == self.media_scanned_folder_filter)
+            })
+            .collect()
+    }
+
+    fn filtered_audio_indices(&self) -> Vec<usize> {
+        let mut indices = (0..self.audio_entries.len()).collect::<Vec<_>>();
+        indices.sort_by(|left_index, right_index| {
+            let left = &self.audio_entries[*left_index];
+            let right = &self.audio_entries[*right_index];
+            let ordering = match self.media_sort_key {
+                MediaSortKey::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+                MediaSortKey::Type => self.audio_index_entries[*left_index]
+                    .mime_type
+                    .cmp(&self.audio_index_entries[*right_index].mime_type),
+                MediaSortKey::Size => left.size_bytes.cmp(&right.size_bytes),
+                MediaSortKey::Replicas => self.audio_index_entries[*left_index]
+                    .replica_count
+                    .cmp(&self.audio_index_entries[*right_index].replica_count),
+                MediaSortKey::Modified => left.modified_at.cmp(&right.modified_at),
+            }
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            if self.media_sort_descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+        indices
+            .into_iter()
+            .filter(|index| {
+                self.audio_scanned_folder_filter == "all"
+                    || self
+                        .audio_entries
+                        .get(*index)
+                        .and_then(|entry| entry.media_root_id)
+                        .is_some_and(|id| id.to_string() == self.audio_scanned_folder_filter)
             })
             .collect()
     }
@@ -2339,16 +2441,28 @@ impl App {
     }
 
     fn reload_media_cache(&mut self) {
-        match self.database.cached_media(&self.local_node_id) {
-            Ok(entries) => {
-                let entries = available_media_entries(entries, &self.managed_folders);
-                self.media_entries = local_entries_from_index(entries.clone());
-                self.media_index_entries = entries;
+        match (
+            self.database.cached_media(&self.local_node_id),
+            self.database.cached_audio(&self.local_node_id),
+        ) {
+            (Ok(media), Ok(audio)) => {
+                let media = available_media_entries(media, &self.managed_folders);
+                let audio = available_media_entries(audio, &self.managed_folders);
+                self.media_entries = local_entries_from_index(media.clone());
+                self.media_index_entries = media;
+                self.audio_entries = local_entries_from_index(audio.clone());
+                self.audio_index_entries = audio;
                 let page_count = self.media_entries.len().div_ceil(FILES_PAGE_SIZE);
                 self.media_page = if page_count == 0 {
                     0
                 } else {
                     self.media_page.min(page_count - 1)
+                };
+                let audio_page_count = self.audio_entries.len().div_ceil(FILES_PAGE_SIZE);
+                self.audio_page = if audio_page_count == 0 {
+                    0
+                } else {
+                    self.audio_page.min(audio_page_count - 1)
                 };
                 self.indexed_files = self
                     .database
@@ -2359,7 +2473,9 @@ impl App {
                     });
                 self.refresh_filtered_files(false);
             }
-            Err(error) => log::error!("failed loading persistent Media index: {error:#}"),
+            (Err(error), _) | (_, Err(error)) => {
+                log::error!("failed loading persistent Media index: {error:#}")
+            }
         }
     }
 
@@ -3076,6 +3192,141 @@ impl App {
             .spacing(10)
             .padding_bottom(10),
             media_content,
+            pagination,
+        ]))
+        .grow(1)
+        .padding(14)
+        .overflow("hidden")
+    }
+
+    fn audio_listing_entries(&self) -> Vec<FileListingEntry> {
+        self.audio_entries
+            .iter()
+            .zip(&self.audio_index_entries)
+            .map(|(entry, indexed)| FileListingEntry::from_media(entry, indexed))
+            .collect()
+    }
+
+    fn audio_panel(&self) -> Item {
+        let audio_indices = self.filtered_audio_indices();
+        let mut audio_summary = format!(
+            "{} audio files from {} folders",
+            audio_indices.len(),
+            self.media_paths.iter().filter(|path| path.enabled).count()
+        );
+        if self.audio_scanned_folder_filter != "all" {
+            audio_summary.push_str("  •  filtered");
+        }
+        if self.media_scan_truncated {
+            audio_summary.push_str("  •  Scan limit reached");
+        }
+        if !self.media_scan_errors.is_empty() {
+            audio_summary.push_str(&format!(
+                "  •  {} folders unavailable",
+                self.media_scan_errors.len()
+            ));
+        }
+
+        let listing_entries = self.audio_listing_entries();
+        let page_count = audio_indices.len().div_ceil(FILES_PAGE_SIZE);
+        let page = self.audio_page.min(page_count.saturating_sub(1));
+        let page_start = page.saturating_mul(FILES_PAGE_SIZE);
+        let page_end = (page_start + FILES_PAGE_SIZE).min(audio_indices.len());
+        let audio_content = if audio_indices.is_empty() {
+            vstack([
+                text("No audio found").color("#374151"),
+                text("Audio from active Scanned folders will appear here after the next scan.")
+                    .color("#6b7280"),
+            ])
+            .grow(1)
+            .spacing(4)
+            .padding(24)
+            .background_color("#f8fafb")
+        } else {
+            self.file_listing(
+                &listing_entries,
+                "table",
+                0,
+                LOCAL_MEDIA_VIEW_ID,
+                audio_indices
+                    .iter()
+                    .copied()
+                    .skip(page_start)
+                    .take(FILES_PAGE_SIZE),
+                Some((self.media_sort_key, self.media_sort_descending)),
+            )
+        };
+        let pagination = if audio_indices.is_empty() {
+            hstack(Vec::<Item>::new())
+        } else {
+            hstack([
+                text(&format!(
+                    "Showing {}–{} of {}",
+                    page_start + 1,
+                    page_end,
+                    audio_indices.len()
+                ))
+                .grow(1)
+                .color("#6b7280"),
+                button("← Previous")
+                    .id(AUDIO_PREVIOUS_PAGE_ID)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color(if page > 0 { "#ffffff" } else { "#f3f4f6" })
+                    .color(if page > 0 { "#0f6175" } else { "#9ca3af" }),
+                button("Next →")
+                    .id(AUDIO_NEXT_PAGE_ID)
+                    .padding(6)
+                    .border("1px solid #dce5e8")
+                    .background_color(if page + 1 < page_count {
+                        "#ffffff"
+                    } else {
+                        "#f3f4f6"
+                    })
+                    .color(if page + 1 < page_count {
+                        "#0f6175"
+                    } else {
+                        "#9ca3af"
+                    }),
+            ])
+            .spacing(6)
+            .padding_top(8)
+        };
+        let mut scanned_folder_options = vec![option("all", "All scanned folders")];
+        scanned_folder_options.extend(self.media_paths.iter().map(|folder| {
+            let id = folder.id.to_string();
+            option(&id, &folder.path)
+        }));
+
+        card(vstack([
+            hstack([
+                vstack([
+                    text("Audio").color("#1f2937"),
+                    text(&audio_summary).color(if self.media_scan_errors.is_empty() {
+                        "#6b7280"
+                    } else {
+                        "#b54708"
+                    }),
+                ])
+                .grow(1)
+                .spacing(3),
+                select(scanned_folder_options)
+                    .id(AUDIO_SCANNED_FOLDER_FILTER_ID)
+                    .svalue(&self.audio_scanned_folder_filter)
+                    .width(170)
+                    .padding(7)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff"),
+                button("↻  Refresh view")
+                    .id(REFRESH_MEDIA_ID)
+                    .padding(7)
+                    .border("1px solid #dce5e8")
+                    .background_color("#ffffff")
+                    .color("#0f6175"),
+            ])
+            .spacing(10)
+            .padding_bottom(10),
+            audio_content,
             pagination,
         ]))
         .grow(1)
@@ -4636,7 +4887,7 @@ fn video_content_type(path: &Path) -> Option<&'static str> {
         Some("video/mp4")
     } else if extension.eq_ignore_ascii_case("webm") {
         Some("video/webm")
-    } else if extension.eq_ignore_ascii_case("ogv") || extension.eq_ignore_ascii_case("ogg") {
+    } else if extension.eq_ignore_ascii_case("ogv") {
         Some("video/ogg")
     } else if extension.eq_ignore_ascii_case("mov") {
         Some("video/quicktime")

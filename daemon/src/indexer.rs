@@ -762,7 +762,7 @@ fn file_mime_type(path: &Path) -> &'static str {
         "video/mp4"
     } else if extension.eq_ignore_ascii_case("webm") {
         "video/webm"
-    } else if extension.eq_ignore_ascii_case("ogv") || extension.eq_ignore_ascii_case("ogg") {
+    } else if extension.eq_ignore_ascii_case("ogv") {
         "video/ogg"
     } else if extension.eq_ignore_ascii_case("mov") {
         "video/quicktime"
@@ -770,6 +770,23 @@ fn file_mime_type(path: &Path) -> &'static str {
         "video/x-m4v"
     } else if extension.eq_ignore_ascii_case("mkv") {
         "video/x-matroska"
+    } else if extension.eq_ignore_ascii_case("mp3") {
+        "audio/mpeg"
+    } else if extension.eq_ignore_ascii_case("m4a") {
+        "audio/mp4"
+    } else if extension.eq_ignore_ascii_case("aac") {
+        "audio/aac"
+    } else if extension.eq_ignore_ascii_case("wav") {
+        "audio/wav"
+    } else if extension.eq_ignore_ascii_case("flac") {
+        "audio/flac"
+    } else if extension.eq_ignore_ascii_case("ogg")
+        || extension.eq_ignore_ascii_case("oga")
+        || extension.eq_ignore_ascii_case("opus")
+    {
+        "audio/ogg"
+    } else if extension.eq_ignore_ascii_case("aif") || extension.eq_ignore_ascii_case("aiff") {
+        "audio/aiff"
     } else if extension.eq_ignore_ascii_case("txt") || extension.eq_ignore_ascii_case("md") {
         "text/plain"
     } else if extension.eq_ignore_ascii_case("json") {
@@ -814,6 +831,7 @@ mod tests {
             std::env::temp_dir().join(format!("puppydrive-indexer-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("photo.jpg"), b"photo").unwrap();
+        std::fs::write(directory.join("song.mp3"), b"audio").unwrap();
         std::fs::write(directory.join("notes.txt"), b"notes").unwrap();
         std::fs::create_dir_all(directory.join("node_modules")).unwrap();
         std::fs::write(directory.join("node_modules/skip.txt"), b"skip").unwrap();
@@ -855,13 +873,14 @@ mod tests {
         .unwrap();
         assert!(finished);
         assert_eq!(database.cached_media(&node_id).unwrap().len(), 1);
-        assert_eq!(database.cached_files(&node_id).unwrap().len(), 2);
+        assert_eq!(database.cached_audio(&node_id).unwrap().len(), 1);
+        assert_eq!(database.cached_files(&node_id).unwrap().len(), 3);
         let history = database.scanned_folder_scan_history(folder_id).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].trigger, ScanTrigger::ManualFolder);
         assert_eq!(history[0].outcome, ScanOutcome::Completed);
         assert_eq!(history[0].directories_scanned, 1);
-        assert_eq!(history[0].files_indexed, 2);
+        assert_eq!(history[0].files_indexed, 3);
         drop(worker);
         drop(database);
         let _ = std::fs::remove_dir_all(directory);

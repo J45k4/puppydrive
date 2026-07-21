@@ -335,6 +335,50 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn cached_audio(&self, node_id: &[u8]) -> Result<Vec<IndexedMediaFile>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "WITH audio_locations AS (
+                 SELECT location.path, location.size, location.mime_type, location.modified_at,
+                        MIN(membership.scanned_folder_id) AS scanned_folder_id, location.hash
+                 FROM file_locations location
+                 JOIN scanned_folder_locations membership
+                   ON membership.node_id = location.node_id AND membership.path = location.path
+                 JOIN ScannedFolder folder ON folder.id = membership.scanned_folder_id
+                 WHERE location.node_id = ?1 AND folder.enabled = 1 AND membership.indexer = 'media'
+                   AND location.mime_type LIKE 'audio/%'
+                 GROUP BY location.node_id, location.path
+             ), audio_representatives AS (
+                 SELECT candidate.*,
+                        CASE WHEN candidate.hash IS NULL THEN 1 ELSE (
+                            SELECT COUNT(*) FROM audio_locations replica
+                            WHERE replica.hash = candidate.hash
+                        ) END AS replica_count
+                 FROM audio_locations candidate
+                 WHERE candidate.hash IS NULL OR candidate.path = (
+                     SELECT MIN(replica.path) FROM audio_locations replica
+                     WHERE replica.hash = candidate.hash
+                 )
+             )
+             SELECT path, size, mime_type, modified_at, scanned_folder_id, hash, replica_count
+             FROM audio_representatives
+             ORDER BY lower(path)",
+        )?;
+        let rows = statement.query_map([node_id], |row| {
+            Ok(IndexedMediaFile {
+                path: PathBuf::from(row.get::<_, String>(0)?),
+                size: row.get::<_, i64>(1)? as u64,
+                mime_type: row.get(2)?,
+                modified_at: row.get(3)?,
+                scanned_folder_id: row.get::<_, i64>(4)? as u32,
+                hash: row.get(5)?,
+                replica_count: row.get::<_, i64>(6)? as usize,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn cached_files(&self, node_id: &[u8]) -> Result<Vec<IndexedFile>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(

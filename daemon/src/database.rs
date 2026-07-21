@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -361,6 +362,39 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn scanned_folder_location_metadata(
+        &self,
+        node_id: &[u8],
+        folder_id: u32,
+    ) -> Result<HashMap<PathBuf, IndexedLocationMetadata>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT location.path, location.hash, location.size, location.created_at, location.modified_at
+             FROM file_locations location
+             JOIN scanned_folder_locations membership
+               ON membership.node_id = location.node_id AND membership.path = location.path
+             WHERE membership.scanned_folder_id = ?1 AND membership.node_id = ?2
+               AND membership.indexer = 'media'",
+        )?;
+        let mut locations = HashMap::new();
+        let rows = statement.query_map(params![folder_id, node_id], |row| {
+            Ok((
+                PathBuf::from(row.get::<_, String>(0)?),
+                IndexedLocationMetadata {
+                    hash: row.get(1)?,
+                    size: row.get::<_, i64>(2)? as u64,
+                    created_at: row.get(3)?,
+                    modified_at: row.get(4)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (path, metadata) = row?;
+            locations.insert(path, metadata);
+        }
+        Ok(locations)
+    }
+
     pub fn media_thumbnail_source(
         &self,
         node_id: &[u8],
@@ -585,6 +619,14 @@ pub struct IndexedFile {
     pub hash: Option<Vec<u8>>,
     pub scanned_folder_id: Option<u32>,
     pub replica_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedLocationMetadata {
+    pub hash: Option<Vec<u8>>,
+    pub size: u64,
+    pub created_at: Option<i64>,
+    pub modified_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]

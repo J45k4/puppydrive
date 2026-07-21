@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub backup: BackupConfig,
     pub appearance: AppearanceConfig,
     pub media: MediaConfig,
+    pub inboxes: Vec<InboxConfig>,
 }
 
 impl Default for AppConfig {
@@ -34,6 +35,29 @@ impl Default for AppConfig {
             backup: BackupConfig::default(),
             appearance: AppearanceConfig::default(),
             media: MediaConfig::default(),
+            inboxes: Vec::new(),
+        }
+    }
+}
+
+/// A writable destination for browser uploads. Permissions and sharing are
+/// deliberately not part of this first version; the stable id leaves room for
+/// those policies to be attached later without changing the destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InboxConfig {
+    pub id: String,
+    pub name: String,
+    /// A folder relative to `server.this_computer_root`.
+    pub folder: PathBuf,
+}
+
+impl Default for InboxConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            folder: PathBuf::new(),
         }
     }
 }
@@ -103,25 +127,6 @@ pub enum BackupSchedule {
     Daily,
 }
 
-impl BackupSchedule {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Continuous => "continuous",
-            Self::Hourly => "hourly",
-            Self::Daily => "daily",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "continuous" => Some(Self::Continuous),
-            "hourly" => Some(Self::Hourly),
-            "daily" => Some(Self::Daily),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceConfig {
@@ -145,30 +150,13 @@ pub enum Theme {
     Dark,
 }
 
-impl Theme {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "system" => Some(Self::System),
-            "light" => Some(Self::Light),
-            "dark" => Some(Self::Dark),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaConfig {
     pub paths_initialized: bool,
+    /// Zero disables the limit.
     pub max_items: usize,
+    /// Zero disables the limit.
     pub max_directories: usize,
     pub watch_debounce_ms: u64,
     pub fallback_rescan_seconds: u64,
@@ -181,8 +169,8 @@ impl Default for MediaConfig {
     fn default() -> Self {
         Self {
             paths_initialized: false,
-            max_items: 1_000,
-            max_directories: 512,
+            max_items: 0,
+            max_directories: 0,
             watch_debounce_ms: 1_000,
             fallback_rescan_seconds: 30,
             ignored_directory_names: vec![
@@ -337,6 +325,25 @@ mod tests {
         assert_eq!(restored.schema_version, CONFIG_SCHEMA_VERSION);
         assert_eq!(restored.backup.schedule, BackupSchedule::Continuous);
         assert_eq!(restored.appearance.theme, Theme::System);
+        assert!(restored.inboxes.is_empty());
+    }
+
+    #[test]
+    fn inboxes_round_trip() {
+        let mut config = AppConfig::default();
+        config.inboxes.push(InboxConfig {
+            id: "inbox-1".to_owned(),
+            name: "Receipts".to_owned(),
+            folder: PathBuf::from("Incoming/Receipts"),
+        });
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.inboxes.len(), 1);
+        assert_eq!(restored.inboxes[0].name, "Receipts");
+        assert_eq!(
+            restored.inboxes[0].folder,
+            PathBuf::from("Incoming/Receipts")
+        );
     }
 
     #[test]

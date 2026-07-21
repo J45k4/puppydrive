@@ -2,6 +2,8 @@ export default class MediaTile {
   constructor(element, ctx) {
     this.element = element;
     this.ctx = ctx;
+    this.image = null;
+    this.observer = null;
   }
 
   mount(props) {
@@ -9,8 +11,7 @@ export default class MediaTile {
   }
 
   setProps(props) {
-    this.observer?.disconnect();
-    this.observer = null;
+    this.clear();
     const thumbnailSize = Math.min(
       320,
       Math.max(140, Number(props.thumbnailSize) || 220),
@@ -52,6 +53,7 @@ export default class MediaTile {
       image.style.objectFit = "cover";
       image.style.pointerEvents = "none";
       preview.append(image);
+      this.image = image;
       const src = String(props.src ?? "");
       this.observer = new IntersectionObserver(
         (entries) => {
@@ -100,8 +102,17 @@ export default class MediaTile {
   }
 
   dispose() {
+    this.clear();
+    this.element.replaceChildren();
+  }
+
+  clear() {
     this.observer?.disconnect();
     this.observer = null;
-    this.element.replaceChildren();
+    if (this.image) {
+      this.image.removeAttribute("src");
+      this.image.src = "";
+      this.image = null;
+    }
   }
 }

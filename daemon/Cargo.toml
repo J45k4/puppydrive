@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 blake3 = "1"
 directories = "6"
+futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 log = "0.4"
 notify = "8"
@@ -18,4 +19,4 @@ serde_json = "1"
 simple_logger = "5"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "ba2303ff40b37e5f035cff74693d591fc0d1e176", features = ["sqlite"] }
+wgui = { git = "https://github.com/J45k4/wgui.git", features = ["sqlite"] }

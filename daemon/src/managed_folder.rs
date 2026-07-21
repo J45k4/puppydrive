@@ -1,6 +1,7 @@
 use std::fs::{self, DirEntry, Metadata};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -9,6 +10,14 @@ use anyhow::{Context, Result, bail};
 pub struct ManagedFolder {
     id: u32,
     root: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct Blake3Hash {
+    pub hash: Vec<u8>,
+    pub open_duration: Duration,
+    pub read_duration: Duration,
+    pub update_duration: Duration,
 }
 
 impl ManagedFolder {
@@ -80,19 +89,37 @@ impl ManagedFolder {
         Ok(bytes)
     }
 
+    #[allow(dead_code)]
     pub fn blake3(&self, path: &Path) -> Result<Vec<u8>> {
+        Ok(self.blake3_timed(path)?.hash)
+    }
+
+    pub fn blake3_timed(&self, path: &Path) -> Result<Blake3Hash> {
         let path = self.canonicalize(path)?;
+        let open_started = Instant::now();
         let mut file = fs::File::open(path)?;
+        let open_duration = open_started.elapsed();
         let mut hasher = blake3::Hasher::new();
         let mut buffer = [0_u8; 64 * 1024];
+        let mut read_duration = Duration::ZERO;
+        let mut update_duration = Duration::ZERO;
         loop {
+            let read_started = Instant::now();
             let read = file.read(&mut buffer)?;
+            read_duration += read_started.elapsed();
             if read == 0 {
                 break;
             }
+            let update_started = Instant::now();
             hasher.update(&buffer[..read]);
+            update_duration += update_started.elapsed();
         }
-        Ok(hasher.finalize().as_bytes().to_vec())
+        Ok(Blake3Hash {
+            hash: hasher.finalize().as_bytes().to_vec(),
+            open_duration,
+            read_duration,
+            update_duration,
+        })
     }
 }
 

@@ -2732,6 +2732,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "directories",
+ "futures-util",
  "image",
  "log",
  "notify",
@@ -4527,7 +4528,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wgui"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=ba2303ff40b37e5f035cff74693d591fc0d1e176#ba2303ff40b37e5f035cff74693d591fc0d1e176"
+source = "git+https://github.com/J45k4/wgui.git#47255f7fe178eade866b1fe7103a09e60bb9fb15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5081,12 +5082,12 @@ dependencies = [
 [[package]]
 name = "wui-core"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=ba2303ff40b37e5f035cff74693d591fc0d1e176#ba2303ff40b37e5f035cff74693d591fc0d1e176"
+source = "git+https://github.com/J45k4/wgui.git#47255f7fe178eade866b1fe7103a09e60bb9fb15"
 
 [[package]]
 name = "wui-derive"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=ba2303ff40b37e5f035cff74693d591fc0d1e176#ba2303ff40b37e5f035cff74693d591fc0d1e176"
+source = "git+https://github.com/J45k4/wgui.git#47255f7fe178eade866b1fe7103a09e60bb9fb15"
 dependencies = [
  "proc-macro2",
  "quote",

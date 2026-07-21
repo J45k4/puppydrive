@@ -6,6 +6,7 @@ export default class ImageViewer {
     this.offsetX = 0;
     this.offsetY = 0;
     this.pointerId = null;
+    this.loader = null;
   }
 
   mount(props) {
@@ -43,7 +44,8 @@ export default class ImageViewer {
     layer.style.transformOrigin = "50% 50%";
 
     const image = document.createElement("img");
-    image.src = this.src;
+    const previewSrc = String(props.previewSrc || "");
+    image.src = previewSrc || this.src;
     image.alt = String(props.alt ?? "");
     image.draggable = false;
     image.style.position = "absolute";
@@ -70,6 +72,32 @@ export default class ImageViewer {
     this.layer = layer;
     this.image = image;
     this.zoomLabel = zoomLabel;
+
+    const loadFullImage = () => {
+      if (this.loader || !this.image) return;
+      const loader = new Image();
+      this.loader = loader;
+      loader.onload = () => {
+        if (this.loader !== loader || !this.image) return;
+        this.loader = null;
+        this.image.src = this.src;
+      };
+      loader.onerror = () => {
+        if (this.loader === loader) this.loader = null;
+      };
+      loader.src = this.src;
+    };
+
+    if (previewSrc && previewSrc !== this.src) {
+      image.addEventListener("load", loadFullImage, { once: true });
+      image.addEventListener(
+        "error",
+        () => {
+          if (this.image === image) image.src = this.src;
+        },
+        { once: true },
+      );
+    }
 
     this.onWheel = (event) => {
       event.preventDefault();
@@ -166,11 +194,22 @@ export default class ImageViewer {
       this.viewport.removeEventListener("pointerup", this.onPointerUp);
       this.viewport.removeEventListener("pointercancel", this.onPointerUp);
     }
+    if (this.loader) {
+      this.loader.onload = null;
+      this.loader.onerror = null;
+      this.loader.src = "";
+      this.loader = null;
+    }
+    if (this.image) {
+      this.image.removeAttribute("src");
+      this.image.src = "";
+    }
     this.viewport = null;
     this.layer = null;
     this.image = null;
     this.zoomLabel = null;
     this.pointerId = null;
+    this.src = null;
   }
 
   dispose() {

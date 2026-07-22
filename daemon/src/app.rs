@@ -2935,6 +2935,53 @@ impl App {
             .collect()
     }
 
+    fn file_source_status(&self, entry: &FileListingEntry) -> (bool, String) {
+        let mut paths = entry
+            .hash
+            .as_deref()
+            .and_then(|hash| {
+                self.database
+                    .file_replica_paths(&self.local_node_id, hash)
+                    .ok()
+            })
+            .unwrap_or_default();
+        if paths.is_empty() {
+            if let Some(path) = &entry.path {
+                paths.push(path.clone());
+            }
+        }
+
+        let mut online = false;
+        let mut locations = Vec::with_capacity(paths.len());
+        for path in paths {
+            let available = fs::metadata(&path).is_ok();
+            online |= available;
+            let status = if available {
+                "● Online"
+            } else {
+                "○ Offline"
+            };
+            let source = self
+                .sources
+                .iter()
+                .find(|source| {
+                    source.enabled
+                        && local_source_path(source).is_some_and(|root| path.starts_with(root))
+                })
+                .map(|source| source.name.clone())
+                .unwrap_or_else(|| "This Computer".to_owned());
+            locations.push(format!("{status} — {source}: {}", path.display()));
+        }
+
+        if locations.is_empty() {
+            locations.push("○ Offline — No current source location".to_owned());
+        }
+        (
+            online,
+            format!("Sources containing this file:\n{}", locations.join("\n")),
+        )
+    }
+
     fn file_listing(
         &self,
         entries: &[FileListingEntry],
@@ -2960,10 +3007,13 @@ impl App {
             };
             let rows = indices.into_iter().filter_map(|index| {
                 let entry = entries.get(index)?;
+                let (online, source_tooltip) = self.file_source_status(entry);
                 Some(serde_json::json!({
                     "index": index,
                     "icon": if entry.is_image() { "▧" } else if entry.is_video() { "▣" } else { "□" },
                     "name": entry.name,
+                    "online": online,
+                    "sourceTooltip": source_tooltip,
                     "type": entry.file_type(),
                     "size": format_size(entry.size),
                     "sizeValue": entry.size,

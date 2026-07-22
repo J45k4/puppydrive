@@ -406,6 +406,20 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn file_replica_paths(&self, node_id: &[u8], hash: &[u8]) -> Result<Vec<PathBuf>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT path FROM file_locations
+             WHERE node_id = ?1 AND hash = ?2
+             ORDER BY lower(path)",
+        )?;
+        let rows = statement.query_map(params![node_id, hash], |row| {
+            row.get::<_, String>(0).map(PathBuf::from)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn scanned_folder_location_metadata(
         &self,
         node_id: &[u8],

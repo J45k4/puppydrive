@@ -1,6 +1,7 @@
 const COLUMNS = [
   { key: "icon", label: "", width: 28, min: 28 },
   { key: "name", label: "Name", width: 360, min: 160, sort: "name" },
+  { key: "online", label: "Online", width: 90, min: 75 },
   { key: "type", label: "Type", width: 120, min: 90 },
   { key: "size", label: "Size", width: 90, min: 70, sort: "sizeValue" },
   { key: "hash", label: "Hash", width: 260, min: 160 },
@@ -117,8 +118,15 @@ export default class FileTable {
         line.onclick = () => this.ctx.emit("open", { index: Number(row.index) });
         for (const column of COLUMNS) {
           const cell = document.createElement("div");
-          cell.textContent = String(row[column.key] ?? "");
-          cell.title = cell.textContent;
+          if (column.key === "online") {
+            const online = Boolean(row.online);
+            cell.textContent = online ? "● Online" : "○ Offline";
+            cell.style.color = online ? "#15803d" : "#b42318";
+            cell.title = String(row.sourceTooltip ?? "");
+          } else {
+            cell.textContent = String(row[column.key] ?? "");
+            cell.title = cell.textContent;
+          }
           cell.style.padding = "7px 8px";
           cell.style.boxSizing = "border-box";
           cell.style.overflowWrap = "anywhere";
